@@ -1,0 +1,17 @@
+schema_version: 1
+# Infrastructure control; set false and replace the planner for reasoning experiments.
+oracle_hints: true
+max_plan_attempts: 2
+roles:
+  observation:
+    factory: agent_recovery.agents:ObservationAgent
+  memory:
+    factory: agent_recovery.agents:MemoryAgent
+    kwargs:
+      window: 8
+  constraints:
+    factory: agent_recovery.agents:ConstraintsAgent
+  planner:
+    factory: agent_recovery.agents:OraclePlanner
+  verifier:
+    factory: agent_recovery.agents:AdmissibilityVerifier
