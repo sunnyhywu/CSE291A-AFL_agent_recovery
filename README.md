@@ -2,8 +2,10 @@
 
 A plain-Python, five-role agent workflow sharing one ALFWorld text environment.
 Its purpose is to make intermediate decisions and dependencies observable for
-future fault injection and recovery experiments. No fault injection, selective
-recomputation, or world-state recovery is implemented yet.
+fault injection and recovery experiments. Phase 1 (an LLM planner baseline,
+controlled fault injection, propagation measurement, full-restart and
+always-verify baselines) is implemented; see [Phase 1 experiments](#phase-1-experiments).
+Selective recomputation and world-state recovery (Phase 2) are not implemented yet.
 
 ## Recommended team: five reasoning roles and one executor
 
@@ -29,6 +31,7 @@ flowchart TD
     P --> V[5. Verifier]
     S --> V
     C --> V
+    O --> V
     V --> G[Deterministic execution gate]
     P --> G
     A --> G
@@ -49,7 +52,7 @@ the world-history path without claiming to be full world-state snapshots.
 | `memory` | `state`, optional `previous_memory`, `previous_action` | `summary: str`, `observations: list[str]`, `actions: list[str]` |
 | `constraints` | `task`, `action_space` | `goal: str`, `allowed_actions: list[str]` |
 | `planner` | `state`, `memory`, `constraints`; optional `oracle`; on retry `feedback`, `previous_plan` | `action: str`; optional `rationale` |
-| `verifier` | `plan`, `state`, `constraints` | `approved: bool`, `reason: str` |
+| `verifier` | `plan`, `state`, `constraints`, raw `observation` | `approved: bool`, `reason: str` |
 
 Constraints form a separate branch from parsed state and memory. A fault in state
 can therefore be structurally connected to planning without contaminating the
@@ -201,6 +204,37 @@ memory, constraints, and admissibility verification deterministic. Then replace
 one additional role at a time. Five logical roles need not mean five paid model
 calls per action. This also makes the effect of each replacement easier to measure.
 
+## Phase 1 experiments
+
+`experiments/phase1.sh` reproduces every Phase 1 result (resumable). The model is
+`api-glm-5.3-flash` on UCSD TritonAI at temperature 0; put `OPENAI_API_KEY` and
+`OPENAI_BASE_URL` in the git-ignored `.env`. Development used the `train` split;
+evaluation uses 18 `valid_unseen` games (3 per task type) with seeds 42–44.
+
+- **Team** (`configs/llm_team.yaml`): three model-backed agents. `LLMObservation` turns the
+  raw observation into sorted atomic facts, `LLMMemory` keeps the shared belief state
+  (known facts, progress notes, recent actions) across steps, and `LLMPlanner` chooses the
+  action. Constraints and admissibility checking stay deterministic. Structured fact lists
+  keep output equivalence exact. `configs/llm_team_verify.yaml` adds `LLMVerifier`
+  (always verify); both allow 3 plan attempts per step.
+- **Executed restart / live calls.** `run_clean --cache-namespace NAME` isolates a batch from
+  cached responses, so every call is live (`LLM_CACHE_NAMESPACE` for single runs).
+
+- **Response cache.** Identical requests are answered from `.llm_cache/`, so a faulty
+  run replays the clean prefix exactly and differs only because of the fault. Reported
+  tokens and latency are *logical*: cache hits count their original cost.
+- **Faults** (`--fault '{"step": 3, "role": "memory", "operator": "stale", "seed": 1}'`):
+  `incorrect`, `missing`, `contradictory`, `stale`, `timeout` (accidental) and
+  `malicious` / `malicious_alter` (adversarial prompt injection asking to discard, or to
+  irreversibly heat/cool/clean, an object the agent has seen) on the raw `environment`
+  observation (a faulty tool result), or the observation, memory (shared state) or planner
+  output. A simulated timeout counts 60 s of logical latency. The trace keeps the original content in a `fault_injected` event.
+  Faults are scheduled only into clean runs that succeeded, and the schedule is moved to
+  the first step where the fault can change its target; unfired faults are still reported.
+- **Comparison.** Each faulty run is paired with its clean run: masked / reasoning only /
+  actions changed / task outcome changed, changed calls vs structural descendants,
+  unauthorized and irreversible actions, wasted work, and full-restart cost.
+
 ## Execution and provenance
 
 Every role call records start/end events with named input IDs, role, attempt,
@@ -233,8 +267,15 @@ agent_recovery/
   environment.py     ALFWorld adapter and testable Environment/Frame interface
   loading.py         YAML factory loading and role overrides
   trace.py           Artifact, ExecutionEvent and append-only dependency DAG
-  __main__.py        command-line entry point
+  llm.py             TritonAI (OpenAI-compatible) client, response cache, rate-limit handling
+  llm_agents.py      LLMPlanner and LLMVerifier (always-verify baseline)
+  injection.py       FaultSpec/Injector: accidental and adversarial faults on one role output
+  policy.py          programmatic unauthorized/irreversible action checks
+  __main__.py        command-line entry point (--split, --game-index, --fault)
 configs/agents.yaml  replaceable role factories and workflow settings
+configs/llm_planner.yaml, configs/llm_verify.yaml  Phase 1 workflows
+experiments/        batch runners (clean, faults), per-episode summaries, phase1.sh
+analysis/           clean-vs-faulty pairing (compare.py) and Phase 1 tables (report.py)
 examples/my_agents.py  model integration template and runnable LookPlanner
 verify_trace.py     schema 1/2 trace validation, no ALFWorld import required
 tests/              provenance, workflow, rejection and hook tests
@@ -247,7 +288,6 @@ its artifact implementation is now shared with this package. See
 ALFWorld API usage follows the installed `alfworld==0.4.2` source and
 [official project](https://github.com/alfworld/alfworld).
 
-Next research milestones remain: observation/memory-based planning, controlled
-artifact mutation, corrected-input comparisons, dependency/influence recovery,
-and reset-and-replay world restoration. Persistent world-state snapshots,
+Next research milestones remain: dependency/influence recovery and
+reset-and-replay world restoration. Persistent world-state snapshots,
 automatic diagnosis, fuzzing, and distributed execution remain outside this change.

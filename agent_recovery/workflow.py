@@ -27,7 +27,7 @@ class AgentTeam:
 
 class Workflow:
     def __init__(self, team: AgentTeam, trace: Trace, seed=42, max_steps=150,
-                 max_plan_attempts=2, oracle_hints=True):
+                 max_plan_attempts=2, oracle_hints=True, injector=None):
         if max_steps < 1 or max_plan_attempts < 1:
             raise ValueError('Step and plan-attempt limits must be positive')
         if not oracle_hints and getattr(team.planner, 'requires_oracle', False):
@@ -36,6 +36,8 @@ class Workflow:
         self.seed, self.max_steps = seed, max_steps
         self.max_plan_attempts, self.oracle_hints = max_plan_attempts, oracle_hints
         self.agent_calls = 0
+        self.injector = injector
+        self.last_output: dict[str, Artifact] = {}
 
     def call(self, role: str, step: int, inputs: dict[str, Artifact], attempt=0) -> Artifact:
         # Copies prevent a hook from changing artifacts used by other roles or stored in the DAG.
@@ -50,20 +52,42 @@ class Workflow:
         started = time.monotonic()
         self.agent_calls += 1
         try:
-            result = getattr(self.team, role).run(request)
-            if not isinstance(result, AgentResult):
-                raise TypeError(f'{role}: run() must return AgentResult')
-            content = json_copy(result.content)
-            validate_result(role, content)
-            if not isinstance(result.metrics, dict) or any(
-                not isinstance(key, str) or type(value) not in (int, float)
-                or not math.isfinite(value) or value < 0 for key, value in result.metrics.items()
-            ):
-                raise ValueError(f'{role}: metrics must map names to finite nonnegative numbers')
+            injector = self.injector
+            previous = self.last_output.get(role)
+            if injector and previous is not None and injector.times_out(role, step, attempt):
+                # Simulated timeout; the workflow's policy reuses the role's last output.
+                injector.fired = True
+                self.trace.event('fault_injected', step, ids, role=role, attempt=attempt,
+                                 fault=injector.spec.to_dict(), original=None,
+                                 fallback=previous.id)
+                ids, named_inputs = ids + (previous.id,), {**named_inputs, 'timeout_fallback': previous.id}
+                # The wait is simulated, so it is reported as logical time rather than slept.
+                content, metrics = previous.content, {'simulated_timeout_seconds': injector.timeout_seconds}
+            else:
+                result = getattr(self.team, role).run(request)
+                if not isinstance(result, AgentResult):
+                    raise TypeError(f'{role}: run() must return AgentResult')
+                content, metrics = json_copy(result.content), result.metrics
+                validate_result(role, content)
+                if not isinstance(metrics, dict) or any(
+                    not isinstance(key, str) or type(value) not in (int, float)
+                    or not math.isfinite(value) or value < 0 for key, value in metrics.items()
+                ):
+                    raise ValueError(f'{role}: metrics must map names to finite nonnegative numbers')
+                faulty = injector.apply(role, step, attempt, content, inputs) if injector else None
+                if faulty is not None:
+                    validate_result(role, faulty)
+                    self.trace.event('fault_injected', step, ids, role=role, attempt=attempt,
+                                     fault=injector.spec.to_dict(), original=content,
+                                     detail=injector.detail)
+                    content = faulty
+            if injector:
+                injector.observe(role, content)
             output = self.trace.add(OUTPUT_KINDS[role], role, ids, step, content)
+            self.last_output[role] = output
             self.trace.event('agent_call_end', step, (output.id,), role=role, attempt=attempt,
                              inputs=named_inputs, duration_seconds=time.monotonic() - started,
-                             metrics=result.metrics)
+                             metrics=metrics)
             return output
         except Exception as exc:
             self.trace.event('agent_call_error', step, ids, role=role, attempt=attempt,
@@ -72,8 +96,17 @@ class Workflow:
             raise
 
     def snapshot(self, frame: Frame, step: int, parents=()):
-        observation = self.trace.add('observation', 'environment', parents, step,
-                                     {'text': frame.text, 'gamefile': frame.gamefile})
+        content = {'text': frame.text, 'gamefile': frame.gamefile}
+        injector = self.injector
+        faulty = injector.apply('environment', step, 0, content, {}) if injector else None
+        # A faulty tool result: agents see the corrupted text; the executor still checks the
+        # environment's own command list, and the original is kept in the trace.
+        observation = self.trace.add('observation', 'environment', parents, step, faulty or content)
+        if faulty is not None:
+            self.trace.event('fault_injected', step, (observation.id,), role='environment', attempt=0,
+                             fault=injector.spec.to_dict(), original=content, detail=injector.detail)
+        if injector:
+            injector.observe('environment', content)
         action_space = self.trace.add('action_space', 'environment', (observation.id,), step,
                                       {'commands': list(frame.commands)})
         oracle = None
@@ -86,7 +119,9 @@ class Workflow:
 
     def finish(self, step, won, reason):
         self.trace.event('run_end', step, won=won, reason=reason, agent_calls=self.agent_calls,
-                         environment_actions=step)
+                         environment_actions=step,
+                         tracking={'bytes': self.trace.bytes_written, 'records': self.trace.sequence
+                                   + len(self.trace.artifacts), 'write_seconds': self.trace.write_seconds})
         return won
 
     def run(self, environment: Environment, configuration=None) -> bool:
@@ -122,9 +157,10 @@ class Workflow:
                     planner_inputs['oracle'] = oracle
                 for attempt in range(self.max_plan_attempts):
                     plan = self.call('planner', step, planner_inputs, attempt)
+                    # The raw observation lets a verifier check derived state against its source.
                     verification = self.call('verifier', step,
-                                             {'plan': plan, 'state': state,
-                                              'constraints': constraints}, attempt)
+                                             {'plan': plan, 'state': state, 'constraints': constraints,
+                                              'observation': observation}, attempt)
                     command = plan.content['action']
                     # Check the environment's command list independently of plugin-produced constraints.
                     admissible = command in action_space.content['commands']

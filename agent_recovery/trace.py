@@ -38,10 +38,16 @@ class Trace:
         self.children: dict[str, set[str]] = {}
         self.sequence = 0
         self.started = time.monotonic()
+        # Bookkeeping overhead: serialized bytes and time spent recording.
+        self.bytes_written, self.write_seconds = 0, 0.0
 
     def write(self, record: dict):
-        self.file.write(json.dumps(record, sort_keys=True, allow_nan=False) + '\n')
+        started = time.monotonic()
+        line = json.dumps(record, sort_keys=True, allow_nan=False) + '\n'
+        self.file.write(line)
         self.file.flush()
+        self.bytes_written += len(line.encode())
+        self.write_seconds += time.monotonic() - started
 
     def add(self, kind: str, producer: str, inputs: tuple[str, ...], step: int, content: dict):
         for parent in inputs:

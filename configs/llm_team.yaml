@@ -1,0 +1,27 @@
+schema_version: 1
+# Multi-agent configuration: model-backed perception, shared memory and planner;
+# deterministic constraints and admissibility verifier; no oracle.
+oracle_hints: false
+max_plan_attempts: 3   # equal to configs/llm_team_verify.yaml, so the comparison is like for like
+roles:
+  observation:
+    factory: agent_recovery.llm_agents:LLMObservation
+    kwargs:
+      model: api-glm-5.3-flash
+      temperature: 0.0
+  memory:
+    factory: agent_recovery.llm_agents:LLMMemory
+    kwargs:
+      model: api-glm-5.3-flash
+      temperature: 0.0
+      window: 8
+  constraints:
+    factory: agent_recovery.agents:ConstraintsAgent
+  planner:
+    factory: agent_recovery.llm_agents:LLMPlanner
+    kwargs:
+      model: api-glm-5.3-flash
+      temperature: 0.0
+      max_tokens: 512
+  verifier:
+    factory: agent_recovery.agents:AdmissibilityVerifier
