@@ -6,3 +6,6 @@ __pycache__/
 results/
 .DS_Store
 *.tmp
+*.aux
+*.log
+*.out

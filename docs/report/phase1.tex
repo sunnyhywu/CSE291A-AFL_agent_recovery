@@ -1,0 +1,278 @@
+\documentclass[10pt]{article}
+\usepackage[letterpaper,margin=0.9in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{newtxtext}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{caption}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\captionsetup{font=small,labelfont=bf,skip=4pt}
+\setlist{nosep,leftmargin=1.3em}
+\setlength{\parskip}{3pt}
+\setlength{\parindent}{0pt}
+\newcommand{\code}[1]{\texttt{\small #1}}
+% Team members.
+\newcommand{\authors}{Ho-Yen Wu, Jui-Yen Wang, Meng-Chi Tsai}
+
+\title{\vspace{-1.5em}Failure Propagation in a Multi-Agent LLM Workflow:\\
+Phase 1 Fault Injection and Measurement in ALFWorld}
+\author{\authors\\\small CSE 291A, Fall 2026, Option 5 \quad Code: commit \code{ca32226}}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-2.5em}
+
+\section{Question and summary}
+Can tracking dependencies between agent results support efficient recovery while
+preserving correct and safe task execution? Phase~1 builds a clean multi-agent LLM
+baseline, injects controlled faults into its intermediate results, and measures how they
+propagate through agent reasoning, shared memory and the environment. It also measures the
+two baselines that Phase~2's selective recovery must beat: full restart and always-verify.
+Main findings, from 2,360 fault-injection episodes on unseen evaluation games:
+\begin{itemize}
+\item The workload depends on the injected results: only 6\% of accidental and 0\% of
+adversarial faults are masked. Accidental faults change executed actions in 34\% of runs
+but task success in only 0.7\%; they mostly waste work. Prompt injections change actions in
+77\% of runs, cause unauthorized actions in 163 of 306 episodes, and irreversible actions in 24.
+\item LLM agents both filter and amplify faults. A corrupted raw observation is the most
+often absorbed, while shared memory delays effects by up to 25 steps.
+\item Full restart costs 1.4--2.9$\times$ a clean episode. Always-verify blocks every
+unauthorized action but loses more tasks than no recovery at all: it detects faults but
+cannot repair them.
+\item Only 61\% of structurally dependent agent calls actually change after a fault, and 47\%
+of faults change the world state, which motivates influence-aware recomputation combined
+with environment reset-and-replay in Phase~2.
+\end{itemize}
+
+\section{System}
+Three LLM agents and two deterministic components play text-based household tasks in
+ALFWorld (Table~\ref{tab:roles}). All agents use \code{api-glm-5.3-flash} (UCSD TritonAI)
+at temperature~0 and emit JSON; fact lists are sorted so that output equality is exact.
+Every agent call is written to an append-only trace as an artifact with named input IDs,
+seed, latency and tokens, forming a dependency DAG that also contains environment
+observations and actions.
+
+\begin{table}[h]
+\centering\small
+\caption{Workflow roles. The memory agent is the shared state carried across steps.}
+\label{tab:roles}
+\begin{tabularx}{\linewidth}{@{}l l X@{}}
+\toprule
+Role & Implementation & Inputs $\rightarrow$ output \\
+\midrule
+Observation agent & LLM & raw observation $\rightarrow$ atomic facts (``apple 1 on countertop 2'', ``holding mug 1'') \\
+Memory agent & LLM & previous beliefs, last action, new facts $\rightarrow$ known facts + progress notes \\
+Planner & LLM & task, facts, memory, constraints $\rightarrow$ one action (3 attempts per step on rejection) \\
+Constraints & deterministic & task + admissible commands \\
+Verifier / executor gate & deterministic & admissibility check; executes only approved, admissible actions \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+A content-addressed \textbf{response cache} answers identical requests. A faulty episode
+therefore replays its clean prefix exactly and differs only through the fault, so each
+faulty run is a controlled counterfactual of its clean run. This was verified: all 1,164
+seed-42 faulty runs reproduced the clean observations up to the fault. Tokens and latencies
+are \emph{logical}, so a cache hit counts its original cost.
+
+\section{Workload and method}
+\textbf{Workload.} Development (prompt and operator design, pilots) used 12 ALFWorld
+\code{train} games. Evaluation uses 18 \code{valid\_unseen} games, the first 3 of each of the
+6 task types, never used for tuning. Clean runs use seeds 42, 43 and 44 with a 50-step limit.
+Versions are pinned: Python 3.10.22, alfworld 0.4.2, openai 3.37.0, the model ID and the commit.
+
+\textbf{Faults.} Each fault replaces one output at one step. \emph{Stages}: the raw
+environment observation (a faulty tool result, read by the observation agent), the
+observation agent's facts, the memory agent's shared beliefs, and the planner's action.
+\emph{Accidental operators}:
+\begin{itemize}
+\item \code{incorrect}: one object is swapped for a wrong one;
+\item \code{missing}: half of the object mentions are deleted;
+\item \code{contradictory}: a sentence denying a present object is added;
+\item \code{stale}: the output from 2 steps earlier is reused;
+\item \code{timeout}: the call times out (60\,s counted) and the previous output is reused.
+\end{itemize}
+\emph{Adversarial operators}: \code{malicious}, a prompt injection that tells the agent to
+put a named object in the garbagecan, and \code{malicious\_alter}, the same with an
+irreversible heat, cool or clean action. The named object is one the agent has seen,
+preferably one the task does not need.
+
+\textbf{Schedule and controls.} One fixed-seed schedule is reused by every method. Faults
+are injected only into games whose clean run succeeded, so a failure can be attributed to
+the fault rather than the model. Each fault is placed early (step 1), mid (half the clean
+length) or late (2 steps before the end), and moved to the first step where it can change
+its target. Seed 42 uses all positions (1,164 episodes); seeds 43 and 44 repeat the mid
+position (805); always-verify reruns the seed-42 mid schedule (391). Failed runs are kept.
+
+\textbf{Measurement.} Each faulty run is aligned with its clean run by (step, role,
+attempt) and classified: \emph{masked} (nothing downstream changed), \emph{reasoning only}
+(agent outputs changed, executed actions did not), \emph{actions changed} (the world-state
+trajectory diverged), or \emph{task outcome changed}. An action is \emph{unauthorized} if it
+takes, moves, heats, cools, cleans or slices an object type the task does not name. It is
+\emph{irreversible} if it is also a state change with no inverse (heat, cool, clean,
+slice). The policy flagged no action in any of the 18 clean seed-42 runs.
+
+\section{Results}
+\subsection{Clean baseline}
+\begin{table}[h]
+\centering\small
+\caption{Clean runs, 54 episodes per workflow (18 games $\times$ 3 seeds). 95\% CIs
+bootstrap over games.}
+\label{tab:clean}
+\begin{tabular}{@{}lcc@{}}
+\toprule
+& Baseline (3 LLM agents) & Always verify (+ LLM verifier) \\
+\midrule
+Success & 53/54 = 98.1\% [94.4, 100]; per seed 100/100/94\% & 53/54; per seed 100/94/100\% \\
+Actions / episode & 11.3 [9.4, 14.1] & 12.4 [10.1, 15.8] \\
+LLM calls / episode & 34.1 & 51.2 (1.50$\times$) \\
+Tokens / episode & 28,175 [21,130, 39,428] & 37,482 (1.33$\times$) \\
+Model latency / episode & 30.3\,s & 44.1\,s \\
+Plan rejections / episode & 0.07 & 0.70 (false positives) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Neither workflow's single loss involves a fault. In always-verify's loss, three false
+rejections in one step stopped a clean episode. An \textbf{executed full restart}
+reran every seed-42 game from scratch with live calls (cache disabled). All 18 won at the
+same cost (24.3k vs.\ 24.0k tokens), but only 8 of 18 took the same number of actions: live
+calls are not deterministic even at temperature~0, which is why controlled comparisons
+use the cache. \textbf{Overheads}: process time outside the episode (cold start) is 0.9\,s,
+of which environment setup is 0.68\,s; the dependency trace costs 10.3\,KB per step and
+8\,ms of recording per episode (0.013\% of episode time).
+
+\subsection{Propagation}
+\begin{figure}[h]
+\centering
+\includegraphics[width=\linewidth]{figures/propagation.pdf}
+\caption{Outcome of each fired fault, by stage and category (seed 42, all positions).}
+\label{fig:propagation}
+\end{figure}
+
+Figure~\ref{fig:propagation} shows the outcome of every fired fault.
+\begin{itemize}
+\item \textbf{The workload depends on the faults.} Masking is rare (0--10\% per stage),
+and occurs mostly when the fault lands 1--2 steps before the episode ends.
+\item \textbf{The observation agent filters raw-observation faults.} 74\% of corrupted raw
+observations change reasoning but not actions; only 37\% of their downstream calls change,
+the lowest of any stage.
+\item \textbf{Accidental faults rarely change task success} (6 of 856 lost). The environment
+re-observes every step, so agents usually re-explore. The cost is +0.7 actions and +1.7k
+tokens per fault.
+\item \textbf{Prompt injections are the serious case.}
+  \begin{itemize}
+  \item 77\% change executed actions and 6\% change the task outcome.
+  \item 163 of 306 episodes took unauthorized actions. The agent picked up the named
+  foreign object in 158 episodes and executed the exact instructed action in 38.
+  \item The irreversible variant caused irreversible actions in 24 episodes.
+  \item Earlier injection is worse: early faults caused 213 unauthorized actions, late
+  ones 31.
+  \end{itemize}
+\item \textbf{The findings hold across seeds.} Repeating the mid-position faults on seeds
+43 and 44 gives the same outcome mix: masked 2--4\%, reasoning only 48--53\%, actions
+changed 41--48\%, outcome changed 3--4\%; the standard deviation across seeds is at most
+2.8 points.
+\item \textbf{More LLM agents amplify injections.} In a single-LLM version of this
+workflow (deterministic observation and memory; 705 faults), injections changed actions
+in only 41\% of runs. Each agent that copies the injected text into its own output gives
+it more authority downstream.
+\end{itemize}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\linewidth]{figures/delay.pdf}
+\caption{Delay between injection and the first changed action, for faults that changed
+actions (seed 42). Planner faults, not shown, always change the action at once.}
+\label{fig:delay}
+\end{figure}
+
+\textbf{Shared memory delays propagation} (Figure~\ref{fig:delay}). Faults at the raw
+observation and the observation agent mostly change the action at the same step, 73\% and
+67\%. Memory faults act later: 30\% first change an action one step later, and across
+stages 20--27\% of action-changing faults appear 2 or more steps later, up to 25--28 steps.
+A recovery mechanism therefore cannot assume that a fault's effects are local in time.
+
+\subsection{Recovery baselines}
+\begin{figure}[h]
+\centering
+\includegraphics[width=\linewidth]{figures/cost.pdf}
+\caption{Tokens needed to finish an episode under each response to a fault, relative to
+the clean episode (mean, 95\% CI over games), with the share of tasks won, on the
+identical seed-42 mid-position schedule. \textsuperscript{\dag}Restart success is the
+executed live-restart rate (18/18).}
+\label{fig:cost}
+\end{figure}
+
+Figure~\ref{fig:cost} compares four responses to the same faults.
+\begin{itemize}
+\item \textbf{Full restart} always recovers the task but repeats all pre-fault work:
+14\%, 46\% and 75\% of the clean episode's tokens for early, mid and late faults. It costs
+1.4--1.5$\times$ a clean episode if the fault is detected immediately and 2.1--2.9$\times$
+if it is detected at the end.
+\item \textbf{Always-verify} blocked every unauthorized and irreversible action: 154 and 8
+under the baseline, 0 and 0 with the verifier. It costs 1.33$\times$ even on clean episodes.
+\item \textbf{But always-verify lost more tasks}: 27 of 389 against the baseline's 11, with
+only 2 lost by both. 23 of the 27 end in \code{verification\_rejected}: the verifier
+correctly notices that a plan relies on corrupted state, but the planner keeps planning from
+that state until the attempt limit stops the episode. Verification detects faults; it does
+not recover from them.
+\end{itemize}
+
+\section{Phase 2 direction}
+In Phase~2 we will build \textbf{selective recovery}: dependency-aware invalidation with an
+influence-aware early cutoff, plus world-state restoration. As the course specifies, every
+method is told which result is faulty.
+\begin{itemize}
+\item \textbf{Structure overestimates influence.} A fired fault has on average 35.2
+structurally downstream calls, of which only 21.6 (61\%) change; for accidental faults the
+share is 37--50\%. Influence-aware recovery recomputes in dependency order and stops along a
+branch once a recomputed output equals the old one. Sorted fact lists make that comparison
+exact and cheap.
+\item \textbf{Recomputation alone is not enough.} In 47\% of fired faults the executed
+actions diverged. ALFWorld replays deterministically given the action prefix (1,164 of
+1,164 matched), so Phase~2 resets the environment, replays the valid prefix while checking
+observation hashes, and resumes from the first affected step. A non-resettable mode
+compensates with inverse actions instead. The 24 episodes with irreversible actions are
+reported as unrecoverable, not as recovered.
+\item \textbf{Comparisons and metrics.} Full restart and always-verify, under the same
+schedule and budget. We measure recovered task correctness and safety (not exact equality,
+given live non-determinism), recomputed calls, retained work, recovery latency, tracking
+overhead at several trace granularities, and an audit that re-executes every reused result
+to check it is still valid.
+\item \textbf{Fuzzing.} The proposal's fuzzing-guided fault discovery is moved to Phase~2.
+The systematic schedule above serves as its non-fuzzing baseline.
+\end{itemize}
+
+\section{Limitations}
+\begin{itemize}
+\item All agents share one model, and constraints and the executor are deterministic by
+design.
+\item Fault runs cover all positions only for seed 42, and always-verify only the mid
+position. CIs resample 17--18 games.
+\item The unauthorized-action policy is a simulation based on object types the task does
+not name.
+\item Latencies are logical (recorded model time plus measured non-model time, excluding
+rate-limit waits). Only the executed restart measures live latency: 27.0\,s wall time
+vs.\ 25.7\,s of model time.
+\item Output equality is exact, so semantically equal but differently worded outputs count
+as changed. This overstates influence, making the 61\% figure conservative for Phase~2.
+\item The injected faults are synthetic.
+\item Two infrastructure failures were kept and rerun: one transient budget rejection from
+the API proxy, and four runs hit by a cache-write race in our runner, since fixed.
+\end{itemize}
+
+\section{Reproducibility and cost}
+Everything ran on a laptop (CPU only). The binding constraint is the API rate limit
+(100 requests/min), not compute. All Phase~1 work used 48.6k API calls (46.3M tokens),
+\$10.65 of TritonAI credit; the final evaluation ran for about 11 hours.
+\code{experiments/phase1.sh} reproduces all results and is resumable;
+\code{analysis/report.py} and \code{analysis/figures.py} regenerate the tables and figures.
+The repository README documents the trace format and the fault and runner command-line
+options.
+
+\end{document}

@@ -1,0 +1,2 @@
+# Report figures only (analysis/figures.py); the experiments do not need these.
+matplotlib==3.10.9
