@@ -292,9 +292,9 @@ def overhead_section(rows):
     return '\n'.join([
         '### Cold start and tracking overhead', '',
         table(['Metric', 'Mean', 'Max'], [
-            ['Process start to exit, incl. Python/ALFWorld start-up (s)',
-             f"{statistics.mean(r['process_seconds'] for r in rows):.1f}",
-             f"{max(r['process_seconds'] for r in rows):.1f}"],
+            ['Cold start: process time outside the episode, incl. Python/ALFWorld start-up (s)',
+             f"{statistics.mean(r['process_seconds'] - r['episode_seconds'] for r in rows):.1f}",
+             f"{max(r['process_seconds'] - r['episode_seconds'] for r in rows):.1f}"],
             ['Environment setup inside the run (s)', f"{statistics.mean(r['setup_seconds'] for r in rows):.2f}",
              f"{max(r['setup_seconds'] for r in rows):.2f}"],
             ['Trace size per environment step (KB)', f'{statistics.mean(per_step) / 1024:.1f}',
