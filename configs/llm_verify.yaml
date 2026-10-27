@@ -1,0 +1,25 @@
+schema_version: 1
+# Always-verify baseline: LLM planner plus an LLM verifier that checks every plan.
+oracle_hints: false
+max_plan_attempts: 3
+roles:
+  observation:
+    factory: agent_recovery.agents:ObservationAgent
+  memory:
+    factory: agent_recovery.agents:MemoryAgent
+    kwargs:
+      window: 8
+  constraints:
+    factory: agent_recovery.agents:ConstraintsAgent
+  planner:
+    factory: agent_recovery.llm_agents:LLMPlanner
+    kwargs:
+      model: api-glm-5.3-flash   # scripts/check_llm.py lists available models
+      temperature: 0.0
+      max_tokens: 512
+  verifier:
+    factory: agent_recovery.llm_agents:LLMVerifier
+    kwargs:
+      model: api-glm-5.3-flash
+      temperature: 0.0
+      max_tokens: 512

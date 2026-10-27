@@ -25,9 +25,13 @@ class Environment(Protocol):
     def close(self) -> None: ...
 
 
+SPLITS = {'train': 'train', 'valid_seen': 'eval_in_distribution',
+          'valid_unseen': 'eval_out_of_distribution'}
+
+
 class AlfworldEnvironment:
     def __init__(self, config_path: Path, seed=42, max_steps=150, gamefile=None,
-                 task_types=(1,), oracle_hints=True):
+                 task_types=(1,), oracle_hints=True, split='train', game_index=0):
         import numpy as np
         import textworld
         import textworld.gym
@@ -36,7 +40,9 @@ class AlfworldEnvironment:
         from alfworld.agents.environment.alfred_tw_env import (
             AlfredDemangler, AlfredInfos, AlfredExpert)
 
-        self.seed, self.oracle_hints = seed, oracle_hints
+        if split not in SPLITS:
+            raise ValueError(f'split must be one of {", ".join(SPLITS)}')
+        self.seed, self.oracle_hints, self.split = seed, oracle_hints, split
         self.config = yaml.safe_load(config_path.read_text())
         self.config['env'].update(type='AlfredTWEnv', domain_randomization=False,
                                   task_types=list(task_types), expert_type='handcoded')
@@ -44,17 +50,20 @@ class AlfworldEnvironment:
         self.config['dagger']['training']['max_nb_steps_per_episode'] = max_steps
         # Apply the game selection after sorting, independently of filesystem traversal order.
         self.config['dataset']['num_train_games'] = -1
-        owner = get_environment('AlfredTWEnv')(self.config, train_eval='train')
+        self.config['dataset']['num_eval_games'] = -1
+        owner = get_environment('AlfredTWEnv')(self.config, train_eval=SPLITS[split])
         games = sorted(str(Path(p).resolve()) for p in owner.game_files)
         if gamefile is not None:
             selected = str(gamefile.resolve())
             if selected not in games:
-                raise ValueError('Gamefile must be an eligible training game for --task-types')
+                raise ValueError('Gamefile must be an eligible game in --split for --task-types')
+        elif 0 <= game_index < len(games):
+            selected = games[game_index]
         elif games:
-            selected = games[0]
+            raise ValueError(f'game_index must be in [0, {len(games)}) for this split')
         else:
             raise RuntimeError('No games found; check ALFWORLD_DATA and run alfworld-download')
-        self.gamefile = selected
+        self.gamefile, self.game_index = selected, games.index(selected)
         random.seed(seed)
         np.random.seed(seed)
         wrappers = [AlfredDemangler(shuffle=False), AlfredInfos]
@@ -71,7 +80,7 @@ class AlfworldEnvironment:
     def describe(self):
         return {'backend': 'alfworld', 'alfworld_version': version('alfworld'),
                 'config': self.config, 'gamefile': self.gamefile,
-                'split': 'train', 'oracle_hints': self.oracle_hints,
+                'split': self.split, 'game_index': self.game_index, 'oracle_hints': self.oracle_hints,
                 'python_hash_seed': os.environ.get('PYTHONHASHSEED', 'unset')}
 
     def _frame(self, obs, info, score=0.0, done=False):

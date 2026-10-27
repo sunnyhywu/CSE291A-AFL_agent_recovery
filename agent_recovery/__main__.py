@@ -1,8 +1,10 @@
 import argparse
+import json
 import os
 from pathlib import Path
 
 from .environment import AlfworldEnvironment
+from .injection import FaultSpec, Injector
 from .loading import load_team
 from .trace import Trace
 from .workflow import Workflow
@@ -20,6 +22,11 @@ def main():
     parser.add_argument('--max-steps', type=int, default=150)
     parser.add_argument('--max-plan-attempts', type=int, help='Total planner/verifier attempts per step')
     parser.add_argument('--gamefile', type=Path)
+    parser.add_argument('--split', choices=('train', 'valid_seen', 'valid_unseen'), default='train')
+    parser.add_argument('--game-index', type=int, default=0,
+                        help='Index into the sorted eligible games of --split')
+    parser.add_argument('--fault', help='JSON FaultSpec, e.g. {"step": 3, "role": "observation", '
+                                        '"operator": "incorrect", "seed": 1}')
     parser.add_argument('--task-types', nargs='+', type=int, choices=range(1, 7), default=[1])
     args = parser.parse_args()
     if args.max_steps < 1 or (args.max_plan_attempts is not None and args.max_plan_attempts < 1):
@@ -33,10 +40,12 @@ def main():
     try:
         env = AlfworldEnvironment(args.config, seed=args.seed, max_steps=args.max_steps,
                                  gamefile=args.gamefile, task_types=args.task_types,
-                                 oracle_hints=config['oracle_hints'])
+                                 oracle_hints=config['oracle_hints'], split=args.split,
+                                 game_index=args.game_index)
         workflow = Workflow(team, trace, seed=args.seed, max_steps=args.max_steps,
                             max_plan_attempts=config['max_plan_attempts'],
-                            oracle_hints=config['oracle_hints'])
+                            oracle_hints=config['oracle_hints'],
+                            injector=Injector(FaultSpec(**json.loads(args.fault))) if args.fault else None)
         won = workflow.run(env, configuration=config)
         print(f'{"SUCCESS" if won else "STOPPED"}: {args.trace} '
               f'({workflow.agent_calls} agent calls)')

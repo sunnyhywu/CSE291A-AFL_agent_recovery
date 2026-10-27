@@ -1,3 +1,11 @@
 .venv/
 __pycache__/
 *.jsonl
+.env
+.llm_cache/
+results/
+.DS_Store
+*.tmp
+*.aux
+*.log
+*.out
