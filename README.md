@@ -233,7 +233,13 @@ evaluation uses 18 `valid_unseen` games (3 per task type) with seeds 42–44.
   the first step where the fault can change its target; unfired faults are still reported.
 - **Comparison.** Each faulty run is paired with its clean run: masked / reasoning only /
   actions changed / task outcome changed, changed calls vs structural descendants,
-  unauthorized and irreversible actions, wasted work, and full-restart cost.
+  unauthorized and irreversible actions, wasted work, full-restart cost, and a
+  behavior **signature** (propagation path, outcome, spread, delay, safety flags).
+- **Fuzzing.** `experiments.fuzz --arm fuzz|random` runs a signature-guided fuzzer or
+  random injection under one episode budget and logs every proposal to `campaign.jsonl`.
+  `analysis.diversity` counts distinct signatures. `analysis.restore` measures
+  reset-and-replay and compensation costs from traces, using the action-effect registry in
+  `agent_recovery/policy.py`. See `docs/PHASE1.md` §4.5 and §5.
 
 ## Execution and provenance
 
@@ -288,6 +294,6 @@ its artifact implementation is now shared with this package. See
 ALFWorld API usage follows the installed `alfworld==0.4.2` source and
 [official project](https://github.com/alfworld/alfworld).
 
-Next research milestones remain: dependency/influence recovery and
-reset-and-replay world restoration. Persistent world-state snapshots,
-automatic diagnosis, fuzzing, and distributed execution remain outside this change.
+Next research milestones remain: dependency/influence recovery and layered world-state
+restoration (`docs/PHASE1.md` §5). Automatic diagnosis and distributed execution remain
+outside this change.

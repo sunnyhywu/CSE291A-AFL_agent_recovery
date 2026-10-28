@@ -47,3 +47,15 @@ $PY -m analysis.report --clean results/team-clean/summary.csv \
     --restart results/team-restart/summary.csv \
     --verify-clean results/team-verify-clean/summary.csv \
     --verify-faults results/team-verify-faults/comparison.csv --out results/phase1-tables.md
+
+# 7. Fuzzer-versus-random pilot: same fault space, same 12 initial faults, 96 episodes each.
+for ARM in random fuzz; do
+  $PY -m experiments.fuzz --arm $ARM --clean results/team-clean --out results/fuzz-pilot/$ARM \
+      --agents $TEAM --budget 96 --workers 3
+done
+
+# 8. Failure diversity (behavior signatures) and world-state restoration costs, from traces.
+$PY -m analysis.diversity --grid results/team-faults/comparison.csv \
+    --repeats results/team-faults-s43/comparison.csv results/team-faults-s44/comparison.csv \
+    --pilot results/fuzz-pilot --out results/diversity.md --figure docs/report/figures/diversity.pdf
+$PY -m analysis.restore --faults results/team-faults --clean results/team-clean --out results/restore.md
