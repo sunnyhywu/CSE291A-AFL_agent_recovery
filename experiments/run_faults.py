@@ -19,35 +19,72 @@ from experiments.run_clean import ROOT, episode
 POSITIONS = {'early': lambda n: 1, 'mid': lambda n: max(1, n // 2), 'late': lambda n: max(1, n - 2)}
 
 
+def clean_games(clean_dir: Path, clean_seed: int) -> dict:
+    """Successful clean runs with this workflow seed, keyed by trace name: the injection targets."""
+    games = {}
+    for trace in sorted(clean_dir.glob('*.jsonl')):
+        match = re.match(r'(\w+)-t(\d)-g(\d+)-s(\d+)\.jsonl', trace.name)
+        if not match or int(match.group(4)) != clean_seed:
+            continue
+        clean = load(trace)
+        if not clean['won']:
+            continue
+        split, task_type, index, run_seed = match.groups()
+        games[trace.name] = {
+            'split': split, 'task_type': int(task_type), 'game_index': int(index),
+            'seed': int(run_seed), 'steps': len(clean['actions']),
+            'texts': {a['step']: a['content']['text'] for a in clean['artifacts'].values()
+                      if a['kind'] == 'observation'}}
+    return games
+
+
+def fire_step(game, role, operator, target):
+    """First step at or after target where the fault changes its target; faults that cannot
+    fire anywhere keep target and are reported unfired."""
+    return next((s for s in range(target, game['steps']) if can_fire(role, operator, game['texts'][s])),
+                target)
+
+
+def schedule_item(name, game, position, role, operator, step, seed):
+    return {'clean_trace': name, 'split': game['split'], 'task_type': game['task_type'],
+            'game_index': game['game_index'], 'seed': game['seed'], 'position': position,
+            'fault': {'step': step, 'role': role, 'operator': operator, 'seed': seed}}
+
+
 def make_schedule(clean_dir: Path, positions, roles, seed: int, clean_seed: int):
     rng = random.Random(seed)
     schedule, seen = [], set()
-    for trace in sorted(clean_dir.glob('*.jsonl')):
-        clean = load(trace)
-        match = re.match(r'(\w+)-t(\d)-g(\d+)-s(\d+)\.jsonl', trace.name)
-        if not clean['won'] or not match or int(match.group(4)) != clean_seed:
-            continue
-        split, task_type, index, run_seed = match.groups()
-        steps = len(clean['actions'])
-        texts = {a['step']: a['content']['text'] for a in clean['artifacts'].values()
-                 if a['kind'] == 'observation'}
+    for name, game in clean_games(clean_dir, clean_seed).items():
         for position in positions:
-            target = POSITIONS[position](steps)
+            target = POSITIONS[position](game['steps'])
             for role in roles:
                 for operator in sorted(TARGETS[role]):
-                    # First step at or after the position where the fault changes its target;
-                    # faults that cannot fire anywhere are still scheduled and reported unfired.
-                    step = next((s for s in range(target, steps) if can_fire(role, operator, texts[s])),
-                                target)
-                    if (trace.name, step, role, operator) in seen:
+                    step = fire_step(game, role, operator, target)
+                    if (name, step, role, operator) in seen:
                         continue  # Short episodes map several positions to one step.
-                    seen.add((trace.name, step, role, operator))
-                    schedule.append({'clean_trace': trace.name, 'split': split,
-                                     'task_type': int(task_type), 'game_index': int(index),
-                                     'seed': int(run_seed), 'position': position,
-                                     'fault': {'step': step, 'role': role, 'operator': operator,
-                                               'seed': rng.randrange(2 ** 31)}})
+                    seen.add((name, step, role, operator))
+                    schedule.append(schedule_item(name, game, position, role, operator, step,
+                                                  rng.randrange(2 ** 31)))
     return schedule
+
+
+def run_item(out: Path, clean_dir: Path, agents: Path, item, max_steps: int, name=None) -> dict:
+    """Run one scheduled faulty episode (skipped if its trace exists) and compare it."""
+    directory = out / (name or fault_name(item))
+    directory.mkdir(exist_ok=True)
+    trace, status = episode(directory, agents, item['split'], item['task_type'],
+                            item['game_index'], item['seed'], max_steps, 1800,
+                            ('--fault', json.dumps(item['fault'])))
+    return {'episode': trace.parent.name, 'position': item['position'], 'status': status,
+            **compare(clean_dir / item['clean_trace'], trace)}
+
+
+def write_rows(path: Path, rows):
+    fields = sorted({key for row in rows for key in row}, key=lambda k: (k != 'episode', k))
+    with path.open('w') as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def fault_name(item):
@@ -90,26 +127,15 @@ def main():
     print(f'{len(schedule)} faulty episodes in {schedule_path}', flush=True)
 
     def run(item):
-        directory = args.out / fault_name(item)
-        directory.mkdir(exist_ok=True)
-        trace, status = episode(directory, args.agents, item['split'], item['task_type'],
-                                item['game_index'], item['seed'], args.max_steps, 1800,
-                                ('--fault', json.dumps(item['fault'])))
-        return item, trace, status
+        return run_item(args.out, args.clean, args.agents, item, args.max_steps)
 
     rows = []
     with ThreadPoolExecutor(args.workers) as pool:
-        for item, trace, status in pool.map(run, schedule):
-            row = {'episode': trace.parent.name, 'position': item['position'], 'status': status,
-                   **compare(args.clean / item['clean_trace'], trace)}
+        for row in pool.map(run, schedule):
             rows.append(row)
-            print(f"{status:9s} {row.get('propagation', 'not_fired'):22s} {trace.parent.name}",
+            print(f"{row['status']:9s} {row.get('propagation', 'not_fired'):22s} {row['episode']}",
                   flush=True)
-    fields = sorted({key for row in rows for key in row}, key=lambda k: (k != 'episode', k))
-    with (args.out / 'comparison.csv').open('w') as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
-        writer.writeheader()
-        writer.writerows(rows)
+    write_rows(args.out / 'comparison.csv', rows)
 
 
 if __name__ == '__main__':
