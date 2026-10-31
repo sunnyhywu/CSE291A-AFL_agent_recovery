@@ -1,0 +1,13 @@
+trace,gamefile,status,won,actions,agent_calls,llm_calls,plan_rejections,parse_failures,input_tokens,output_tokens,llm_seconds,cache_hits,wall_seconds
+train-t1-g000-s42.jsonl,/Users/arielsmac/.cache/alfworld/json_2.1.1/train/pick_and_place_simple-AlarmClock-None-Desk-307/trial_T20190907_072303_146844/game.tw-pddl,terminal,True,12,60,12,0,0,6724,546,5.04,12,8.41
+train-t1-g001-s42.jsonl,/Users/arielsmac/.cache/alfworld/json_2.1.1/train/pick_and_place_simple-AlarmClock-None-Desk-307/trial_T20190907_072329_828593/game.tw-pddl,terminal,True,11,55,11,0,0,5770,452,4.97,0,13.32
+train-t2-g000-s42.jsonl,/Users/arielsmac/.cache/alfworld/json_2.1.1/train/look_at_obj_in_light-AlarmClock-None-DeskLamp-301/trial_T20190907_174127_043461/game.tw-pddl,terminal,True,11,55,11,0,0,8221,2143,14.02,0,23.44
+train-t2-g001-s42.jsonl,/Users/arielsmac/.cache/alfworld/json_2.1.1/train/look_at_obj_in_light-AlarmClock-None-DeskLamp-301/trial_T20190907_174142_375532/game.tw-pddl,terminal,True,5,25,5,0,0,3498,449,3.64,0,12.07
+train-t3-g000-s42.jsonl,/Users/arielsmac/.cache/alfworld/json_2.1.1/train/pick_clean_then_place_in_recep-Apple-None-DiningTable-19/trial_T20190907_230021_185388/game.tw-pddl,terminal,False,50,252,51,1,0,47004,4257,33.39,31,26.99
+train-t3-g001-s42.jsonl,/Users/arielsmac/.cache/alfworld/json_2.1.1/train/pick_clean_then_place_in_recep-Apple-None-DiningTable-19/trial_T20190907_230051_730842/game.tw-pddl,terminal,True,6,30,6,0,0,5680,251,3.56,1,9.97
+train-t4-g000-s42.jsonl,/Users/arielsmac/.cache/alfworld/json_2.1.1/train/pick_heat_then_place_in_recep-Apple-None-CounterTop-2/trial_T20190908_112534_364453/game.tw-pddl,terminal,True,8,40,8,0,0,7396,373,4.13,0,11.4
+train-t4-g001-s42.jsonl,/Users/arielsmac/.cache/alfworld/json_2.1.1/train/pick_heat_then_place_in_recep-Apple-None-CounterTop-2/trial_T20190908_112607_841503/game.tw-pddl,terminal,True,7,35,7,0,0,5930,291,4.59,0,11.77
+train-t5-g000-s42.jsonl,/Users/arielsmac/.cache/alfworld/json_2.1.1/train/pick_cool_then_place_in_recep-Apple-None-CounterTop-14/trial_T20190909_044958_536304/game.tw-pddl,terminal,True,9,45,9,0,0,6879,465,5.52,0,11.8
+train-t5-g001-s42.jsonl,/Users/arielsmac/.cache/alfworld/json_2.1.1/train/pick_cool_then_place_in_recep-Apple-None-CounterTop-14/trial_T20190909_045026_110157/game.tw-pddl,terminal,False,50,250,50,0,0,39342,3688,29.47,14,31.63
+train-t6-g000-s42.jsonl,/Users/arielsmac/.cache/alfworld/json_2.1.1/train/pick_two_obj_and_place-AlarmClock-None-Desk-304/trial_T20190907_215326_695860/game.tw-pddl,terminal,True,8,40,8,0,0,4802,381,3.12,0,9.4
+train-t6-g001-s42.jsonl,/Users/arielsmac/.cache/alfworld/json_2.1.1/train/pick_two_obj_and_place-AlarmClock-None-Desk-304/trial_T20190910_021303_108559/game.tw-pddl,terminal,True,8,40,8,0,0,5301,462,3.75,0,10.09

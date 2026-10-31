@@ -147,8 +147,8 @@ picture: masked 2–4%, reasoning only 48–53%, actions changed 41–48%, outco
 
 Findings:
 
-1. **The workload depends on the injected results.** Only 6% of accidental and 0% of
-   adversarial faults are masked. The rest change later agent outputs, and 34% / 77%
+1. **The workload depends on the injected results.** Only 6% of accidental and 0.3% (1 of 306)
+   of adversarial faults are masked. The rest change later agent outputs, and 34% / 77%
    change executed actions. Most masked cases were injected 1–2 steps before the episode
    ended.
 2. **LLM agents filter some faults and amplify others.**
@@ -231,7 +231,7 @@ Full tables are in `results/diversity.md`.
   * Entries are picked with weight severity / (1 + times picked); severe means an outcome
     change or a new unauthorized or irreversible action.
   * The random arm samples game, stage–operator pair, step and seed uniformly.
-  * Both arms ran 96 episodes on the same 17 games, starting from the same 12 initial
+  * Both arms ran 96 episodes on the same 18-game fault space, starting from the same 12 initial
     faults.
 
 | Arm | Distinct signatures | Not in grid | Severe episodes | Severe signatures | Irreversible-action episodes | Post-fault tokens |
