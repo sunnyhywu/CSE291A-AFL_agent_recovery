@@ -100,7 +100,7 @@ def main():
     if args.pilot:
         pilots = {arm: campaign(args.pilot / arm) for arm, _ in ARMS if (args.pilot / arm / 'campaign.jsonl').exists()}
         lines += ['', '## Fuzzer-versus-random pilot', '',
-                  'Same fault space and budget, the same 12 initial random faults, 17 games.', '',
+                  'Same fault space and budget, the same 12 initial random faults, 18 games.', '',
                   '| Arm | Episodes | Fired | Distinct signatures | Not in grid | Severe episodes | '
                   'Distinct severe signatures | Outcome changed | Post-fault tokens |',
                   '|---|---:|---:|---:|---:|---:|---:|---:|---:|']
@@ -151,6 +151,7 @@ def main():
             ax.set_title(title, fontsize=8, loc='left', color=INK)
             ax.set_xlim(0, budget)
             ax.set_ylim(0)
+            ax.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
             ax.set_xlabel('Faulty episodes run')
             tidy(ax, 'y')
             ax.tick_params(colors=MUTED)

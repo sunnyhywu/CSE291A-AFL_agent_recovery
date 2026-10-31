@@ -1,2 +1,2 @@
-# Report figures only (analysis/figures.py); the experiments do not need these.
+# Figures: analysis/figures.py and analysis/diversity.py (experiments/phase1.sh step 8).
 matplotlib==3.10.9

@@ -3,7 +3,16 @@ __pycache__/
 *.jsonl
 .env
 .llm_cache/
-results/
+# Raw traces and logs are in the results archive (see README). Tables, per-episode CSVs,
+# fault schedules, pilot logs and two example traces are tracked.
+results/**
+!results/**/
+!results/*.md
+!results/**/comparison.csv
+!results/**/summary.csv
+!results/**/schedule.jsonl
+!results/**/campaign.jsonl
+!results/examples/*.jsonl
 .DS_Store
 *.tmp
 *.aux
