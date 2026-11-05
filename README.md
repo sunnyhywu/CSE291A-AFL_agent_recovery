@@ -8,7 +8,7 @@ preserving correct and safe task execution?
 **Status:** Phase 1 (fault injection and propagation measurement) is complete. Phase 2 (selective
 recovery) is designed but not implemented.
 
-**Start here:** the [Phase 1 report](docs/report/phase1.pdf) (6 pages). A longer writeup is in
+**Start here:** the [Phase 1 report](docs/report/phase1.pdf). A longer writeup is in
 [docs/PHASE1.md](docs/PHASE1.md).
 
 ## Results
