@@ -27,6 +27,10 @@ with identical content and the recorded output is still valid:
 Agents are stateless: an output depends only on the role, the call seed (derived from the
 workflow seed, role, step and attempt) and the input contents, never on artifact IDs. With
 `audit=True` every reused output is also recomputed and compared, at no counted cost.
+
+The recovered run acts on the world through `world.RecordedWorld`, which restores the real
+world (reset and replay, or compensation with inverse actions) only when a recovered action
+first differs from the recorded one, and reports irreversible effects.
 """
 from collections import Counter
 from dataclasses import replace
@@ -38,12 +42,10 @@ from .contracts import ROLES
 from .environment import Environment, Frame
 from .trace import Artifact
 from .workflow import StepState, Workflow, extract_task
+from .world import (MECHANISMS, RecordedWorld, ReplayMismatch, RestoreFailed,  # noqa: F401
+                    artifacts as _artifacts, check, recording)
 
 MODES = ('cutoff', 'invalidate')
-
-
-class ReplayMismatch(RuntimeError):
-    """The environment did not reproduce the recorded world state."""
 
 
 def read_records(path: Path) -> list[dict]:
@@ -61,11 +63,6 @@ def prefix(records: list[dict], step: int) -> list[dict]:
                 and record['step'] == step):
             return records[:index]
     raise ValueError(f'Trace has no agent call at step {step}')
-
-
-def _artifacts(records):
-    return [Artifact(r['id'], r['kind'], r['producer'], tuple(r['inputs']), r['step'], r['content'])
-            for r in records if r['record'] == 'artifact']
 
 
 def rebuild_state(records: list[dict], step: int) -> StepState:
@@ -98,66 +95,50 @@ def rebuild_state(records: list[dict], step: int) -> StepState:
 
 def replay(environment: Environment, records: list[dict]) -> Frame:
     """Reset, then re-execute the prefix's recorded actions, checking every observation."""
-    artifacts = _artifacts(records)
-    observations = [a for a in artifacts if a.kind == 'observation']
-    spaces = [a for a in artifacts if a.kind == 'action_space']
-    actions = [a for a in artifacts if a.kind == 'action']
-    # An injected environment fault corrupts what agents saw; the world produced the original.
-    originals = {r['artifact_ids'][0]: r['details']['original'] for r in records
-                 if r['record'] == 'event' and r['kind'] == 'fault_injected'
-                 and r['details']['role'] == 'environment'}
-    if not len(observations) == len(spaces) == len(actions) + 1:
-        raise ValueError('Prefix observations and actions do not align')
-
-    def check(frame: Frame, index: int):
-        observation = observations[index]
-        expected = originals.get(observation.id, observation.content)
-        if frame.text != expected['text']:
-            raise ReplayMismatch(f'Observation differs at step {index}')
-        if list(frame.commands) != spaces[index].content['commands']:
-            raise ReplayMismatch(f'Admissible commands differ at step {index}')
-        if frame.done or frame.won:
-            raise ReplayMismatch(f'Episode ended during replay at step {index}')
-
+    record = recording(records)
     frame = environment.reset()
-    check(frame, 0)
-    for index, action in enumerate(actions):
-        frame = environment.step(action.content['command'])
-        check(frame, index + 1)
+    check(frame, record.frames[0], 0)
+    for index, command in enumerate(record.actions):
+        frame = environment.step(command)
+        check(frame, record.frames[index + 1], index + 1)
     return frame
 
 
-def restore(source: Path, step: int, workflow: Workflow, environment: Environment,
-            invalid=frozenset()) -> StepState:
-    """Copy `source`'s prefix before `step` into the workflow's fresh trace, replay the
-    environment to the same world state, and return the agent state to resume from.
-
-    If the step's observation is in `invalid` (a corrupted tool result), it is replaced by a
-    fresh snapshot of the replayed world, together with its action space and oracle hint.
-    """
+def restore_agents(records: list[dict], step: int, workflow: Workflow) -> StepState:
+    """Layer 1: copy the prefix before `step` into the workflow's fresh trace and rebuild the
+    agent state from it."""
     if workflow.injector is not None:
         raise ValueError('Fault injection is not supported on a resumed run')
-    trace = workflow.trace
-    records = prefix(read_records(source), step)
-    trace.extend(records)
+    records = prefix(records, step)
+    workflow.trace.extend(records)
+    return rebuild_state(records, step)
+
+
+def restore(source: Path, step: int, workflow: Workflow, environment: Environment) -> StepState:
+    """Restore the agent state before `step` and eagerly reset and replay the environment to the
+    same world state; returns the state to resume from."""
+    records = read_records(source)
+    state = restore_agents(records, step, workflow)
     started = time.monotonic()
-    frame = replay(environment, records)
-    replay_seconds = time.monotonic() - started
-    state = rebuild_state(records, step)
-    if state.observation.id in invalid:
-        observation, action_space, oracle = workflow.snapshot(
-            frame, step, state.observation.inputs)
-        task = state.task
-        if step == 0:
-            task = trace.add('task', 'task_extractor', (observation.id,), 0,
-                             {'goal': extract_task(frame.text)})
-        trace.event('observation_refreshed', step, (state.observation.id, observation.id))
-        state = replace(state, observation=observation, action_space=action_space,
-                        oracle=oracle, task=task)
-    trace.event('state_restored', step, (state.observation.id,), source=str(source),
-                mechanism='reset_replay', replayed_actions=step, replay_seconds=replay_seconds,
-                prefix_agent_calls=state.agent_calls)
+    replay(environment, prefix(records, step))
+    workflow.trace.event('state_restored', step, (state.observation.id,), source=str(source),
+                         mechanism='reset_replay', replayed_actions=step,
+                         replay_seconds=time.monotonic() - started,
+                         prefix_agent_calls=state.agent_calls)
     return state
+
+
+def refresh(workflow: Workflow, state: StepState, frame: Frame) -> StepState:
+    """Replace a corrupted observation (and what derives from it) with a fresh observation."""
+    trace, step = workflow.trace, state.step
+    observation, action_space, oracle = workflow.snapshot(frame, step, state.observation.inputs)
+    task = state.task
+    if step == 0:
+        task = trace.add('task', 'task_extractor', (observation.id,), 0,
+                         {'goal': extract_task(frame.text)})
+    trace.event('observation_refreshed', step, (state.observation.id, observation.id))
+    return replace(state, observation=observation, action_space=action_space, oracle=oracle,
+                   task=task)
 
 
 def _signature(inputs: dict) -> dict:
@@ -215,10 +196,19 @@ def faulty_artifact(records: list[dict]) -> str | None:
 
 
 def recover(source: Path, faulty_id: str, workflow: Workflow, environment: Environment,
-            mode='cutoff', audit=False, configuration=None) -> bool:
-    """Selectively recover `source` given its faulty artifact; returns the recovered success."""
+            mode='cutoff', world='reset', position: int | None = None, audit=False,
+            configuration=None) -> bool:
+    """Selectively recover `source` given its faulty artifact; returns the recovered success.
+
+    `world` picks how the real world is restored at the first divergent action ('reset',
+    'compensate' or 'auto', see `agent_recovery.world`). For compensation, `position` is how
+    many recorded actions `environment` has executed (default: all, i.e. recovery starts after
+    the faulty episode ended).
+    """
     if mode not in MODES:
         raise ValueError(f'mode must be one of {", ".join(MODES)}')
+    if world not in MECHANISMS:
+        raise ValueError(f'world must be one of {", ".join(MECHANISMS)}')
     records = read_records(source)
     artifacts = {a.id: a for a in _artifacts(records)}
     if faulty_id not in artifacts:
@@ -237,25 +227,44 @@ def recover(source: Path, faulty_id: str, workflow: Workflow, environment: Envir
     invalid = {faulty_id}
     if mode == 'invalidate':
         invalid |= descendants(records, faulty_id)
-    state = restore(source, faulty.step, workflow, environment, invalid)
+    world_view = RecordedWorld(environment, recording(records), workflow.trace, world, position)
+    state = restore_agents(records, faulty.step, workflow)
+    world_view.start(faulty.step)
+    workflow.trace.event('recovery_started', faulty.step, mode=mode, world=world,
+                         source=str(source), faulty_artifact=faulty_id, invalidated=len(invalid),
+                         audit=audit, prefix_agent_calls=state.agent_calls)
+    if state.observation.id in invalid:
+        try:
+            state = refresh(workflow, state, world_view.observe(faulty.step))
+        except Exception as exc:
+            workflow.trace.event('run_error', faulty.step, error_type=type(exc).__name__,
+                                 message=str(exc))
+            raise
     workflow.reuse = SelectiveReuse(records, invalid, audit)
-    workflow.trace.event('recovery_started', faulty.step, mode=mode, source=str(source),
-                         faulty_artifact=faulty_id, invalidated=len(invalid), audit=audit)
-    return workflow.resume(environment, state, configuration)
+    return workflow.resume(world_view, state, configuration)
 
 
 def summarize(path: Path) -> dict:
-    """Work retained and recomputed by one resumed or recovered episode."""
+    """Work retained and recomputed, and world restoration, of one recovered episode.
+
+    `complete_recovery` is conservative: the task succeeded and no irreversible effect was
+    left behind. Whether a reported irreversible effect was harmless (e.g. the task needed it
+    anyway) is for the analysis to decide, not for recovery to assume.
+    """
     records = read_records(path)
-    resumed = next(r for r in records if r['record'] == 'event' and r['kind'] == 'run_resumed')
-    calls = [r for r in records if r['record'] == 'event' and r['kind'] == 'agent_call_end'
-             and r['sequence'] > resumed['sequence']]
+    events = [r for r in records if r['record'] == 'event']
+    start = next(e for e in events if e['kind'] in ('recovery_started', 'run_resumed'))
+    calls = [e for e in events if e['kind'] == 'agent_call_end' and e['sequence'] > start['sequence']]
     reused = [c for c in calls if 'reused_from' in c['details']]
     recomputed = [c for c in calls if 'reused_from' not in c['details']]
-    end = records[-1]['details'] if records[-1].get('kind') == 'run_end' else {}
+    restores = [e['details'] for e in events if e['kind'] == 'world_restored']
+    irreversible = [command for r in restores for command in r['irreversible']]
+    end = events[-1]['details'] if events[-1]['kind'] == 'run_end' else {}
+    won = end.get('won')
     return {
-        'won': end.get('won'),
-        'prefix_calls': resumed['details']['prefix_agent_calls'],
+        'won': won,
+        'complete_recovery': bool(won) and not irreversible,
+        'prefix_calls': start['details']['prefix_agent_calls'],
         'reused_calls': len(reused),
         'recomputed_calls': len(recomputed),
         'recomputed_by_role': dict(Counter(c['details']['role'] for c in recomputed)),
@@ -263,4 +272,9 @@ def summarize(path: Path) -> dict:
                                  + c['details']['metrics'].get('output_tokens', 0)
                                  for c in recomputed),
         'audit_mismatches': sum(c['details'].get('audit_match') is False for c in reused),
+        'world_restores': restores,
+        'world_actions': sum(r['environment_actions'] for r in restores),
+        'irreversible_effects': irreversible,
+        'fallbacks': sum(e['kind'] == 'world_restore_fallback' for e in events),
+        'restore_failed': any(e['kind'] == 'world_restore_failed' for e in events),
     }
