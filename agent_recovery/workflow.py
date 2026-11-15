@@ -25,6 +25,13 @@ class AgentTeam:
                 for role in ROLES}
 
 
+def extract_task(text: str) -> str:
+    match = re.search(r'Your task is to:\s*([^\n]+)', text)
+    if match is None:
+        raise ValueError('Initial observation contains no task goal')
+    return match.group(1).strip()
+
+
 @dataclass(frozen=True)
 class StepState:
     """Everything the step loop needs at the start of `step`, before its first agent call.
@@ -58,6 +65,10 @@ class Workflow:
         self.injector = injector
         self.last_output: dict[str, Artifact] = {}
         self.step = 0
+        # Selective recovery: an object whose lookup(role, step, attempt, inputs) returns a
+        # recorded output to reuse instead of calling the agent (agent_recovery.recovery).
+        self.reuse = None
+        self.reused_calls = 0
 
     def call(self, role: str, step: int, inputs: dict[str, Artifact], attempt=0) -> Artifact:
         # Copies prevent a hook from changing artifacts used by other roles or stored in the DAG.
@@ -74,7 +85,18 @@ class Workflow:
         try:
             injector = self.injector
             previous = self.last_output.get(role)
-            if injector and previous is not None and injector.times_out(role, step, attempt):
+            recorded = self.reuse.lookup(role, step, attempt, inputs) if self.reuse else None
+            reuse_details = {}
+            if recorded is not None:
+                # Identical inputs to a recorded valid call: keep its output, at no new cost.
+                content, metrics = recorded.content, {}
+                reuse_details['reused_from'] = recorded.id
+                if self.reuse.audit:
+                    # Re-execution audit: the reused output must equal a fresh computation.
+                    fresh = getattr(self.team, role).run(request)
+                    reuse_details['audit_match'] = json_copy(fresh.content) == content
+                self.reused_calls += 1
+            elif injector and previous is not None and injector.times_out(role, step, attempt):
                 # Simulated timeout; the workflow's policy reuses the role's last output.
                 injector.fired = True
                 self.trace.event('fault_injected', step, ids, role=role, attempt=attempt,
@@ -107,7 +129,7 @@ class Workflow:
             self.last_output[role] = output
             self.trace.event('agent_call_end', step, (output.id,), role=role, attempt=attempt,
                              inputs=named_inputs, duration_seconds=time.monotonic() - started,
-                             metrics=metrics)
+                             metrics=metrics, **reuse_details)
             return output
         except Exception as exc:
             self.trace.event('agent_call_error', step, ids, role=role, attempt=attempt,
@@ -154,11 +176,8 @@ class Workflow:
                              max_steps=self.max_steps, max_plan_attempts=self.max_plan_attempts)
             frame = environment.reset()
             observation, action_space, oracle = self.snapshot(frame, 0)
-            match = re.search(r'Your task is to:\s*([^\n]+)', frame.text)
-            if match is None:
-                raise ValueError('Initial observation contains no task goal')
             task = self.trace.add('task', 'task_extractor', (observation.id,), 0,
-                                  {'goal': match.group(1).strip()})
+                                  {'goal': extract_task(frame.text)})
             if frame.done or frame.won:
                 return self.finish(0, frame.won, 'terminal')
             return self._steps(environment, StepState(0, observation, action_space, oracle, task))
@@ -174,6 +193,7 @@ class Workflow:
         """
         if self.injector is not None:
             raise ValueError('Fault injection is not supported on a resumed run')
+        self.reused_calls = 0
         if self.oracle_hints != (state.oracle is not None):
             raise ValueError('Restored state and workflow disagree on oracle hints')
         for artifact in (state.observation, state.action_space, state.oracle, state.task,

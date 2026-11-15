@@ -54,8 +54,8 @@ class RecoveryTests(unittest.TestCase):
         path = self.root / name
         trace = Trace(path)
         try:
-            state = restore(source, step, trace, environment)
             workflow = Workflow(team, trace, oracle_hints=oracle)
+            state = restore(source, step, workflow, environment)
             won = workflow.resume(environment, state)
         finally:
             trace.close()
@@ -123,7 +123,7 @@ class RecoveryTests(unittest.TestCase):
         trace = Trace(self.root / 'resumed.jsonl')
         self.addCleanup(trace.close)
         with self.assertRaisesRegex(ReplayMismatch, 'step 1'):
-            restore(source, 1, trace, Drifted())
+            restore(source, 1, Workflow(oracle_team(), trace), Drifted())
 
     def test_replay_compares_against_the_original_of_a_corrupted_observation(self):
         injector = Injector(FaultSpec(step=1, role='environment', operator='incorrect', seed=3))
@@ -144,15 +144,17 @@ class RecoveryTests(unittest.TestCase):
         trace = Trace(self.root / 'resumed.jsonl')
         self.addCleanup(trace.close)
         with self.assertRaisesRegex(ValueError, 'no agent call at step 2'):
-            restore(source, 2, trace, FakeEnvironment())
+            restore(source, 2, Workflow(oracle_team(), trace), FakeEnvironment())
 
     def test_resume_rejects_injection_and_oracle_mismatch(self):
         source = self.record('source.jsonl', oracle_team(), FakeEnvironment())
         trace = Trace(self.root / 'resumed.jsonl')
         self.addCleanup(trace.close)
         env = FakeEnvironment()
-        state = restore(source, 1, trace, env)
         injector = Injector(FaultSpec(step=1, role='planner', operator='incorrect'))
+        with self.assertRaisesRegex(ValueError, 'Fault injection'):
+            restore(source, 1, Workflow(oracle_team(), trace, injector=injector), env)
+        state = restore(source, 1, Workflow(oracle_team(), trace), env)
         with self.assertRaisesRegex(ValueError, 'Fault injection'):
             Workflow(oracle_team(), trace, injector=injector).resume(env, state)
         team = oracle_team()
