@@ -47,6 +47,10 @@ class ReplayMismatch(RuntimeError):
 class RestoreFailed(RuntimeError):
     """The world could not be brought back to the required recorded state."""
 
+    def __init__(self, message: str, spent: int = 0):
+        super().__init__(message)
+        self.spent = spent  # environment actions already executed by the failed attempt
+
 
 def artifacts(records: list[dict]) -> list[Artifact]:
     return [Artifact(r['id'], r['kind'], r['producer'], tuple(r['inputs']), r['step'], r['content'])
@@ -151,7 +155,8 @@ class RecordedWorld:
         if step == 0:
             if self.mechanism == 'compensate':
                 self.trace.event('world_restore_failed', 0, mechanism='compensate',
-                                 reason='the initial observation can only be re-observed by a reset')
+                                 reason='the initial observation can only be re-observed by a reset',
+                                 environment_actions=0)
                 raise RestoreFailed('The initial observation can only be re-observed by a reset')
             frame = self.environment.reset()
             self._log('reset', 0, 0, 1, [], True)
@@ -169,12 +174,11 @@ class RecordedWorld:
                 self.live = True
                 return
             except RestoreFailed as failure:
+                kind = 'world_restore_failed' if self.mechanism == 'compensate' else 'world_restore_fallback'
+                self.trace.event(kind, j, mechanism='compensate', reason=str(failure),
+                                 environment_actions=failure.spent)
                 if self.mechanism == 'compensate':
-                    self.trace.event('world_restore_failed', j, mechanism='compensate',
-                                     reason=str(failure))
                     raise
-                self.trace.event('world_restore_fallback', j, mechanism='compensate',
-                                 reason=str(failure))
         self._reset_replay(j)
         self.live = True
 
@@ -207,13 +211,14 @@ class RecordedWorld:
                 continue
             undo = inverse(actions[i], location_before(actions, i))
             if undo is None or undo not in commands:
-                raise RestoreFailed(f'No admissible inverse for {actions[i]!r} at step {i}')
+                raise RestoreFailed(f'No admissible inverse for {actions[i]!r} at step {i}', spent)
             commands, spent = list(self.environment.step(undo).commands), spent + 1
         matched = sorted(commands) == sorted(frames[j].commands)
         self.position = j
         self._log('compensate', j, origin, spent, irreversible, matched,
                   time.monotonic() - started)
         if not matched:
+            # Already logged with its cost by _log; spent=0 avoids counting it twice.
             raise RestoreFailed(f'World fingerprint differs from step {j} after compensation')
 
     def _log(self, mechanism, target, origin, spent, irreversible, matched, seconds=0.0):

@@ -273,7 +273,10 @@ def summarize(path: Path) -> dict:
                                  for c in recomputed),
         'audit_mismatches': sum(c['details'].get('audit_match') is False for c in reused),
         'world_restores': restores,
-        'world_actions': sum(r['environment_actions'] for r in restores),
+        # Includes the actions of failed compensation attempts, which are real cost too.
+        'world_actions': sum(r['environment_actions'] for r in restores)
+        + sum(e['details'].get('environment_actions', 0) for e in events
+              if e['kind'] in ('world_restore_failed', 'world_restore_fallback')),
         'irreversible_effects': irreversible,
         'fallbacks': sum(e['kind'] == 'world_restore_fallback' for e in events),
         'restore_failed': any(e['kind'] == 'world_restore_failed' for e in events),

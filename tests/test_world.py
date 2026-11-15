@@ -210,6 +210,12 @@ class WorldRestoreTests(unittest.TestCase):
         summary = summarize(path)
         self.assertTrue(summary['complete_recovery'])
         self.assertEqual(summary['fallbacks'], 1)
+        # The failed attempt's undo actions are counted as well as the reset replay.
+        failed = sum(1 for r in read_records(path) if r.get('kind') == 'world_restore_fallback'
+                     for _ in range(r['details']['environment_actions']))
+        self.assertGreater(failed, 0)
+        self.assertEqual(summary['world_actions'],
+                         failed + summary['world_restores'][0]['environment_actions'])
         self.assertEqual(actions(path), CLEAN)
 
     def test_no_world_restore_when_actions_never_diverge(self):
