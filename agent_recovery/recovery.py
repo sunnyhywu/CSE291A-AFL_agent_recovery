@@ -141,8 +141,21 @@ def refresh(workflow: Workflow, state: StepState, frame: Frame) -> StepState:
                    task=task)
 
 
+def _portable(artifact: Artifact) -> dict:
+    """Artifact content as a reuse key, independent of the machine that recorded it.
+
+    An observation's gamefile is an absolute path under the local ALFWorld data directory,
+    which differs between machines (Phase 1 ran elsewhere). Agents never read it; the game's
+    identity is kept by its last four path components (split/task/trial/file).
+    """
+    content = artifact.content
+    if artifact.kind == 'observation' and isinstance(content.get('gamefile'), str):
+        content = {**content, 'gamefile': '/'.join(Path(content['gamefile']).parts[-4:])}
+    return content
+
+
 def _signature(inputs: dict) -> dict:
-    return {name: (artifact.kind, json.dumps(artifact.content, sort_keys=True))
+    return {name: (artifact.kind, json.dumps(_portable(artifact), sort_keys=True))
             for name, artifact in inputs.items()}
 
 

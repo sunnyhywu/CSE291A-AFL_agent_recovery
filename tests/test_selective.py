@@ -177,6 +177,21 @@ class SelectiveRecoveryTests(unittest.TestCase):
         trace.close()
         self.assertGreater(summarize(path)['audit_mismatches'], 0)
 
+    def test_reuse_key_ignores_the_machine_specific_data_directory(self):
+        from agent_recovery.recovery import _signature
+        from agent_recovery.trace import Artifact
+
+        def observation(gamefile, text='same'):
+            return {'observation': Artifact('a0', 'observation', 'environment', (), 0,
+                                            {'text': text, 'gamefile': gamefile})}
+        game = 'json_2.1.1/valid_unseen/pick_and_place_simple-Mug/trial_1/game.tw-pddl'
+        self.assertEqual(_signature(observation(f'/Users/a/.cache/alfworld/{game}')),
+                         _signature(observation(f'/home/b/data/alfworld/{game}')))
+        other = game.replace('trial_1', 'trial_2')
+        self.assertNotEqual(_signature(observation(f'/Users/a/.cache/alfworld/{game}')),
+                            _signature(observation(f'/Users/a/.cache/alfworld/{other}')))
+        self.assertNotEqual(_signature(observation(game)), _signature(observation(game, 'x')))
+
     def test_recovery_rejects_an_incompatible_workflow_or_artifact(self):
         source = self.run_episode('memory.jsonl',
                                   dict(step=1, role='memory', operator='incorrect', seed=2))
