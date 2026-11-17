@@ -94,7 +94,11 @@ class Workflow:
                 if self.reuse.audit:
                     # Re-execution audit: the reused output must equal a fresh computation.
                     fresh = getattr(self.team, role).run(request)
-                    reuse_details['audit_match'] = json_copy(fresh.content) == content
+                    fresh_content = json_copy(fresh.content)
+                    reuse_details['audit_match'] = fresh_content == content
+                    reuse_details['audit_metrics'] = dict(fresh.metrics)
+                    if fresh_content != content:
+                        reuse_details['audit_output'] = fresh_content
                 self.reused_calls += 1
             elif injector and previous is not None and injector.times_out(role, step, attempt):
                 # Simulated timeout; the workflow's policy reuses the role's last output.

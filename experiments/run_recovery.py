@@ -100,20 +100,32 @@ def recover_one(args):
         environment.close()
 
 
+def logged(text: str, label: str) -> str | None:
+    return next((line.split(maxsplit=1)[1] for line in text.splitlines()
+                 if line.startswith(f'{label}:') and len(line.split(maxsplit=1)) > 1), None)
+
+
 def run(out: Path, faults: Path, clean: Path, agents: Path, item: dict, mode: str, world: str,
-        audit: bool, timeout: float) -> dict:
-    """Recover one scheduled episode in its own process (skipped if its trace exists)."""
+        audit: bool, timeout: float, namespace: str | None = None) -> dict:
+    """Recover one scheduled episode in its own process (skipped if its trace exists).
+
+    With `namespace`, model calls use a fresh cache namespace per (episode, mode, world), so
+    the recovery makes live calls that no other recovery or recorded run can answer."""
     directory = out / item['episode']
     directory.mkdir(parents=True, exist_ok=True)
     trace = directory / f'{mode}-{world}.jsonl'
     log = trace.with_suffix('.log')
     if trace.exists():
-        # Resumed batch: report the recorded outcome and process time from the log.
+        # Resumed batch: report the recorded outcome, process time and namespace from the log.
         text = log.read_text() if log.exists() else ''
         status = ('won' if 'SUCCESS:' in text else 'stopped' if 'STOPPED:' in text else 'error')
-        seconds = next((float(line.split()[1]) for line in text.splitlines()
-                        if line.startswith('PROCESS_SECONDS:')), None)
+        seconds = logged(text, 'PROCESS_SECONDS')
+        seconds = float(seconds) if seconds else None
+        cache_namespace = logged(text, 'CACHE_NAMESPACE') or ''
     else:
+        # Per episode as well: recoveries of different faults in the same game would otherwise
+        # answer each other's requests once they return to the clean path.
+        cache_namespace = f'{namespace}-{item["episode"]}-{mode}-{world}' if namespace else ''
         command = [sys.executable, '-m', 'experiments.run_recovery', 'one',
                    '--source', str(faults / item['episode'] / item['trace']), '--trace', str(trace),
                    '--agents', str(agents), '--mode', mode, '--world', world]
@@ -121,8 +133,12 @@ def run(out: Path, faults: Path, clean: Path, agents: Path, item: dict, mode: st
             command.append('--audit')
         env = {**os.environ, 'PYTHONHASHSEED': '0',
                'ALFWORLD_DATA': os.environ.get('ALFWORLD_DATA', str(Path.home() / '.cache/alfworld'))}
+        env.pop('LLM_CACHE_NAMESPACE', None)
+        if cache_namespace:
+            env['LLM_CACHE_NAMESPACE'] = cache_namespace
         started = time.monotonic()
         with log.open('w') as handle:
+            print(f'CACHE_NAMESPACE: {cache_namespace}', file=handle, flush=True)
             try:
                 code = subprocess.run(command, cwd=ROOT, env=env, stdout=handle,
                                       stderr=subprocess.STDOUT, timeout=timeout).returncode
@@ -133,7 +149,8 @@ def run(out: Path, faults: Path, clean: Path, agents: Path, item: dict, mode: st
             # Whole-process time, including interpreter and ALFWorld start-up.
             print(f'PROCESS_SECONDS: {seconds:.2f}', file=handle)
     return {'episode': item['episode'], 'mode': mode, 'world': world, 'status': status,
-            'process_seconds': seconds, **{k: item[k] for k in CARRIED},
+            'process_seconds': seconds, 'cache_namespace': cache_namespace,
+            **{k: item[k] for k in CARRIED},
             **measure(trace, clean / item['trace'])}
 
 
@@ -155,6 +172,9 @@ def measure(trace: Path, clean: Path) -> dict:
              and e['sequence'] > started['sequence'] and 'reused_from' not in e['details']]
     llm = [c['details']['metrics'] for c in calls if 'cache_hit' in c['details']['metrics']]
     live = [m for m in llm if not m['cache_hit']]
+    audits = [e['details']['audit_metrics'] for e in events if e['kind'] == 'agent_call_end'
+              and 'cache_hit' in e['details'].get('audit_metrics', {})]
+    live_audits = [m for m in audits if not m['cache_hit']]
     goal = next(r['content']['goal'] for r in records if r.get('kind') == 'task')
     actions = actions_of(records)
     checks = [classify(a, goal) for a in actions]
@@ -173,6 +193,9 @@ def measure(trace: Path, clean: Path) -> dict:
         'live_calls': len(live),
         'live_tokens': sum(m['input_tokens'] + m['output_tokens'] for m in live),
         'audit_mismatches': summary['audit_mismatches'],
+        'audited_llm_calls': len(audits),
+        'audit_live_calls': len(live_audits),
+        'audit_live_tokens': sum(m['input_tokens'] + m['output_tokens'] for m in live_audits),
         'world_actions': summary['world_actions'],
         'world_seconds': sum(r['seconds'] for r in summary['world_restores']),
         'world_mechanisms': '|'.join(r['mechanism'] for r in summary['world_restores']),
@@ -211,6 +234,9 @@ def main():
                         choices=('reset', 'compensate', 'auto'))
     parser.add_argument('--no-audit', action='store_true',
                         help='Skip recomputing reused outputs to check that they remain valid')
+    parser.add_argument('--namespace',
+                        help='Make live model calls in a fresh cache namespace per recovery: '
+                             '<name>-<episode>-<mode>-<world>')
     parser.add_argument('--workers', type=int, default=3)
     parser.add_argument('--timeout', type=float, default=1800)
     args = parser.parse_args()
@@ -228,7 +254,7 @@ def main():
     def job(spec):
         item, mode, world = spec
         return run(args.out, args.faults, args.clean, args.agents, item, mode, world,
-                   not args.no_audit, args.timeout)
+                   not args.no_audit, args.timeout, args.namespace)
 
     rows = []
     with ThreadPoolExecutor(args.workers) as pool:
