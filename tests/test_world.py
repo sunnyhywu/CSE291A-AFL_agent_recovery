@@ -240,6 +240,33 @@ class WorldRestoreTests(unittest.TestCase):
         self.assertEqual(fresh['content']['text'], 'You pick up the apple 1 from the countertop 1.')
         self.assertEqual(actions(path), CLEAN)
 
+    def test_irreversible_effects_of_a_superseded_compensation_are_not_counted(self):
+        import json
+        path = self.root / 'synthetic.jsonl'
+
+        def event(sequence, kind, **details):
+            return {'record': 'event', 'sequence': sequence, 'kind': kind, 'step': 1,
+                    'artifact_ids': [], 'elapsed_seconds': 0.0, 'details': details}
+        compensated = dict(mechanism='compensate', to_step=1, from_step=4, environment_actions=3,
+                           irreversible=['heat apple 1 with microwave 1'], seconds=0.0)
+        records = [
+            event(0, 'recovery_started', prefix_agent_calls=5),
+            event(1, 'world_restored', **compensated, fingerprint_match=False),
+            event(2, 'world_restore_fallback', mechanism='compensate', reason='fingerprint',
+                  environment_actions=0),
+            event(3, 'world_restored', mechanism='reset', to_step=1, from_step=None,
+                  environment_actions=2, irreversible=[], fingerprint_match=True, seconds=0.0),
+            event(4, 'run_end', won=True)]
+        path.write_text(''.join(json.dumps(r) + '\n' for r in records))
+        summary = summarize(path)
+        self.assertEqual(summary['irreversible_effects'], [])
+        self.assertTrue(summary['complete_recovery'])
+        self.assertEqual(summary['world_actions'], 5)  # both attempts cost real actions
+        # A compensation that took effect keeps its irreversible effects.
+        records[1]['details']['fingerprint_match'] = True
+        path.write_text(''.join(json.dumps(r) + '\n' for r in records[:2] + records[4:]))
+        self.assertEqual(summarize(path)['irreversible_effects'], ['heat apple 1 with microwave 1'])
+
     def test_location_before(self):
         steps = ['go to a 1', 'take x 1 from a 1', 'go to b 1', 'open b 1']
         self.assertIsNone(location_before(steps, 0))

@@ -271,7 +271,10 @@ def summarize(path: Path) -> dict:
     reused = [c for c in calls if 'reused_from' in c['details']]
     recomputed = [c for c in calls if 'reused_from' not in c['details']]
     restores = [e['details'] for e in events if e['kind'] == 'world_restored']
-    irreversible = [command for r in restores for command in r['irreversible']]
+    # Only the restoration that took effect counts: when a compensation attempt fails its
+    # fingerprint check and falls back to reset, the reset also undoes what it skipped.
+    effective = [r for r in restores if r['fingerprint_match']][-1:]
+    irreversible = [command for r in effective for command in r['irreversible']]
     end = events[-1]['details'] if events[-1]['kind'] == 'run_end' else {}
     won = end.get('won')
     return {

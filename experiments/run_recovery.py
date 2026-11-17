@@ -107,8 +107,13 @@ def run(out: Path, faults: Path, clean: Path, agents: Path, item: dict, mode: st
     directory.mkdir(parents=True, exist_ok=True)
     trace = directory / f'{mode}-{world}.jsonl'
     log = trace.with_suffix('.log')
-    status, seconds = 'resumed', None
-    if not trace.exists():
+    if trace.exists():
+        # Resumed batch: report the recorded outcome and process time from the log.
+        text = log.read_text() if log.exists() else ''
+        status = ('won' if 'SUCCESS:' in text else 'stopped' if 'STOPPED:' in text else 'error')
+        seconds = next((float(line.split()[1]) for line in text.splitlines()
+                        if line.startswith('PROCESS_SECONDS:')), None)
+    else:
         command = [sys.executable, '-m', 'experiments.run_recovery', 'one',
                    '--source', str(faults / item['episode'] / item['trace']), '--trace', str(trace),
                    '--agents', str(agents), '--mode', mode, '--world', world]
@@ -117,14 +122,16 @@ def run(out: Path, faults: Path, clean: Path, agents: Path, item: dict, mode: st
         env = {**os.environ, 'PYTHONHASHSEED': '0',
                'ALFWORLD_DATA': os.environ.get('ALFWORLD_DATA', str(Path.home() / '.cache/alfworld'))}
         started = time.monotonic()
-        try:
-            with log.open('w') as handle:
+        with log.open('w') as handle:
+            try:
                 code = subprocess.run(command, cwd=ROOT, env=env, stdout=handle,
                                       stderr=subprocess.STDOUT, timeout=timeout).returncode
-            status = {0: 'won', 1: 'stopped'}.get(code, f'error({code})')
-        except subprocess.TimeoutExpired:
-            status = 'timeout'
-        seconds = time.monotonic() - started
+                status = {0: 'won', 1: 'stopped'}.get(code, f'error({code})')
+            except subprocess.TimeoutExpired:
+                status = 'timeout'
+            seconds = time.monotonic() - started
+            # Whole-process time, including interpreter and ALFWorld start-up.
+            print(f'PROCESS_SECONDS: {seconds:.2f}', file=handle)
     return {'episode': item['episode'], 'mode': mode, 'world': world, 'status': status,
             'process_seconds': seconds, **{k: item[k] for k in CARRIED},
             **measure(trace, clean / item['trace'])}
