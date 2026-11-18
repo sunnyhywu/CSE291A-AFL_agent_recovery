@@ -142,7 +142,11 @@ def run(out: Path, faults: Path, clean: Path, agents: Path, item: dict, mode: st
             try:
                 code = subprocess.run(command, cwd=ROOT, env=env, stdout=handle,
                                       stderr=subprocess.STDOUT, timeout=timeout).returncode
-                status = {0: 'won', 1: 'stopped'}.get(code, f'error({code})')
+                # An uncaught exception also exits with 1, so the outcome comes from the log.
+                handle.flush()
+                text = log.read_text()
+                status = ('won' if code == 0 and 'SUCCESS:' in text
+                          else 'stopped' if code == 1 and 'STOPPED:' in text else f'error({code})')
             except subprocess.TimeoutExpired:
                 status = 'timeout'
             seconds = time.monotonic() - started
