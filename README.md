@@ -6,10 +6,12 @@ CSE 291A, Fall 2026, Option 5. Team: Ho-Yen Wu, Jui-Yen Wang, Meng-Chi Tsai.
 preserving correct and safe task execution?
 
 **Status:** Phase 1 (fault injection and propagation measurement) is complete. Phase 2 (selective
-recovery) is designed but not implemented.
+recovery) is implemented and evaluated on the 389 seed-42 mid-position faults, with cached and live
+model calls; the compensation measurement and further experiments are in progress.
 
 **Start here:** the [Phase 1 report](docs/report/phase1_report.pdf). A longer writeup is in
-[docs/PHASE1.md](docs/PHASE1.md).
+[docs/PHASE1.md](docs/PHASE1.md). Phase 2 progress, results and next steps are in
+[docs/report/phase2.md](docs/report/phase2.md).
 
 ## Results
 
@@ -26,6 +28,11 @@ CSV and fault schedule, and [results/examples/](results/examples/) has one clean
 | Faults, seeds 43 and 44, mid | `team-faults-s43`, `team-faults-s44` | 805 |
 | Always-verify, same seed-42 mid faults | `team-verify-faults` | 391 |
 | Fuzzer versus random pilot | `fuzz-pilot` | 192 |
+| Phase 2: selective recovery, cached (cutoff/invalidate x reset/auto) | `recovery-mid` | 389 (1,556 recoveries) |
+| Phase 2: selective recovery, live calls (cutoff/invalidate x reset) | `recovery-live-mid` | 389 (778 recoveries) |
+
+Phase 2 is compared with the Phase 1 baselines in [recovery-comparison.md](results/recovery-comparison.md).
+`recovery-pilot` and `recovery-live-pilot` are 21-episode pilots.
 
 `eval-*` holds the earlier single-LLM comparison, and `pilot-*` holds development runs.
 
@@ -108,7 +115,7 @@ deterministic even at temperature 0, so expect similar overall results rather th
 | --- | --- |
 | [agent_recovery/](agent_recovery/) | Workflow, LLM agents, fault injection, dependency trace, action policy |
 | [configs/](configs/) | `llm_team.yaml` is the evaluated workflow; `llm_team_verify.yaml` is always-verify |
-| [experiments/](experiments/) | `phase1.sh` runs everything; `run_clean.py`, `run_faults.py` and `fuzz.py` are the runners |
+| [experiments/](experiments/) | `phase1.sh` runs Phase 1; `run_clean.py`, `run_faults.py`, `fuzz.py` and `run_recovery.py` (Phase 2) are the runners |
 | [analysis/](analysis/) | Clean-versus-faulty comparison, tables, figures, diversity and restore costs |
 | [docs/report/](docs/report/) | Report source, figures and PDF |
 | [tests/](tests/), [verify_trace.py](verify_trace.py) | Unit tests and the trace validator |
