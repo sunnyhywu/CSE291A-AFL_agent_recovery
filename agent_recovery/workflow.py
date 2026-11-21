@@ -1,6 +1,6 @@
 """Five replaceable roles, bounded replanning, and a deterministic execution gate."""
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import math
 import re
@@ -25,6 +25,32 @@ class AgentTeam:
                 for role in ROLES}
 
 
+def extract_task(text: str) -> str:
+    match = re.search(r'Your task is to:\s*([^\n]+)', text)
+    if match is None:
+        raise ValueError('Initial observation contains no task goal')
+    return match.group(1).strip()
+
+
+@dataclass(frozen=True)
+class StepState:
+    """Everything the step loop needs at the start of `step`, before its first agent call.
+
+    Every field is an artifact already in the trace, so the state is a set of pointers into
+    the immutable DAG: rolling back means pointing at earlier versions.
+    """
+    step: int
+    observation: Artifact
+    action_space: Artifact
+    oracle: Artifact | None
+    task: Artifact
+    memory: Artifact | None = None
+    previous_action: Artifact | None = None
+    # Each role's latest output (used as the fallback for a simulated timeout).
+    last_output: dict[str, Artifact] = field(default_factory=dict)
+    agent_calls: int = 0
+
+
 class Workflow:
     def __init__(self, team: AgentTeam, trace: Trace, seed=42, max_steps=150,
                  max_plan_attempts=2, oracle_hints=True, injector=None):
@@ -38,6 +64,11 @@ class Workflow:
         self.agent_calls = 0
         self.injector = injector
         self.last_output: dict[str, Artifact] = {}
+        self.step = 0
+        # Selective recovery: an object whose lookup(role, step, attempt, inputs) returns a
+        # recorded output to reuse instead of calling the agent (agent_recovery.recovery).
+        self.reuse = None
+        self.reused_calls = 0
 
     def call(self, role: str, step: int, inputs: dict[str, Artifact], attempt=0) -> Artifact:
         # Copies prevent a hook from changing artifacts used by other roles or stored in the DAG.
@@ -54,7 +85,22 @@ class Workflow:
         try:
             injector = self.injector
             previous = self.last_output.get(role)
-            if injector and previous is not None and injector.times_out(role, step, attempt):
+            recorded = self.reuse.lookup(role, step, attempt, inputs) if self.reuse else None
+            reuse_details = {}
+            if recorded is not None:
+                # Identical inputs to a recorded valid call: keep its output, at no new cost.
+                content, metrics = recorded.content, {}
+                reuse_details['reused_from'] = recorded.id
+                if self.reuse.audit:
+                    # Re-execution audit: the reused output must equal a fresh computation.
+                    fresh = getattr(self.team, role).run(request)
+                    fresh_content = json_copy(fresh.content)
+                    reuse_details['audit_match'] = fresh_content == content
+                    reuse_details['audit_metrics'] = dict(fresh.metrics)
+                    if fresh_content != content:
+                        reuse_details['audit_output'] = fresh_content
+                self.reused_calls += 1
+            elif injector and previous is not None and injector.times_out(role, step, attempt):
                 # Simulated timeout; the workflow's policy reuses the role's last output.
                 injector.fired = True
                 self.trace.event('fault_injected', step, ids, role=role, attempt=attempt,
@@ -87,7 +133,7 @@ class Workflow:
             self.last_output[role] = output
             self.trace.event('agent_call_end', step, (output.id,), role=role, attempt=attempt,
                              inputs=named_inputs, duration_seconds=time.monotonic() - started,
-                             metrics=metrics)
+                             metrics=metrics, **reuse_details)
             return output
         except Exception as exc:
             self.trace.event('agent_call_error', step, ids, role=role, attempt=attempt,
@@ -126,7 +172,7 @@ class Workflow:
 
     def run(self, environment: Environment, configuration=None) -> bool:
         """Caller owns environment/trace cleanup. Every episode uses a fresh Workflow."""
-        step = 0
+        self.step = 0
         try:
             self.trace.event('run_start', 0, schema_version=2, seed=self.seed,
                              environment=environment.describe(), agents=self.team.describe(),
@@ -134,63 +180,95 @@ class Workflow:
                              max_steps=self.max_steps, max_plan_attempts=self.max_plan_attempts)
             frame = environment.reset()
             observation, action_space, oracle = self.snapshot(frame, 0)
-            match = re.search(r'Your task is to:\s*([^\n]+)', frame.text)
-            if match is None:
-                raise ValueError('Initial observation contains no task goal')
             task = self.trace.add('task', 'task_extractor', (observation.id,), 0,
-                                  {'goal': match.group(1).strip()})
-            memory = previous_action = None
+                                  {'goal': extract_task(frame.text)})
             if frame.done or frame.won:
                 return self.finish(0, frame.won, 'terminal')
-            for step in range(self.max_steps):
-                state = self.call('observation', step, {'observation': observation})
-                memory_inputs = {'state': state}
-                if memory is not None:
-                    memory_inputs['previous_memory'] = memory
-                if previous_action is not None:
-                    memory_inputs['previous_action'] = previous_action
-                memory = self.call('memory', step, memory_inputs)
-                constraints = self.call('constraints', step,
-                                        {'task': task, 'action_space': action_space})
-                planner_inputs = {'state': state, 'memory': memory, 'constraints': constraints}
-                if oracle is not None:
-                    planner_inputs['oracle'] = oracle
-                for attempt in range(self.max_plan_attempts):
-                    plan = self.call('planner', step, planner_inputs, attempt)
-                    # The raw observation lets a verifier check derived state against its source.
-                    verification = self.call('verifier', step,
-                                             {'plan': plan, 'state': state, 'constraints': constraints,
-                                              'observation': observation}, attempt)
-                    command = plan.content['action']
-                    # Check the environment's command list independently of plugin-produced constraints.
-                    admissible = command in action_space.content['commands']
-                    approved = verification.content['approved'] and admissible
-                    reason = verification.content['reason'] if admissible else 'Executor: inadmissible command'
-                    gate = self.trace.add('execution_gate', 'deterministic_executor',
-                                          (plan.id, verification.id, action_space.id), step,
-                                          {'approved': approved, 'reason': reason,
-                                           'action': command})
-                    if approved:
-                        break
-                    self.trace.event('plan_rejected', step, (plan.id, verification.id, gate.id),
-                                     attempt=attempt, reason=reason)
-                    planner_inputs['feedback'] = gate
-                    planner_inputs['previous_plan'] = plan
-                else:
-                    return self.finish(step, False, 'verification_rejected')
-                action = self.trace.add('action', 'deterministic_executor',
-                                        (plan.id, verification.id, gate.id), step,
-                                        {'command': command})
-                self.trace.event('action_requested', step, (action.id,), command=command)
-                frame = environment.step(command)
-                observation, action_space, oracle = self.snapshot(
-                    frame, step + 1, (action.id, observation.id))
-                self.trace.event('transition', step + 1, (action.id, observation.id),
-                                 score=frame.score, done=frame.done, won=frame.won)
-                previous_action = action
-                if frame.done or frame.won:
-                    return self.finish(step + 1, frame.won, 'terminal')
-            return self.finish(self.max_steps, False, 'step_limit')
+            return self._steps(environment, StepState(0, observation, action_space, oracle, task))
         except Exception as exc:
-            self.trace.event('run_error', step, error_type=type(exc).__name__, message=str(exc))
+            self.trace.event('run_error', self.step, error_type=type(exc).__name__, message=str(exc))
             raise
+
+    def resume(self, environment: Environment, state: StepState, configuration=None) -> bool:
+        """Continue an episode from the start of `state.step`.
+
+        The caller has already written the state's artifacts into this trace and brought the
+        environment to the matching world state (see `agent_recovery.recovery.restore`).
+        """
+        if self.injector is not None:
+            raise ValueError('Fault injection is not supported on a resumed run')
+        self.reused_calls = 0
+        if self.oracle_hints != (state.oracle is not None):
+            raise ValueError('Restored state and workflow disagree on oracle hints')
+        for artifact in (state.observation, state.action_space, state.oracle, state.task,
+                         state.memory, state.previous_action, *state.last_output.values()):
+            if artifact is not None and self.trace.artifacts.get(artifact.id) != artifact:
+                raise ValueError(f'Restored artifact {artifact.id} is not in this trace')
+        self.agent_calls = state.agent_calls
+        self.last_output = dict(state.last_output)
+        self.step = state.step
+        try:
+            self.trace.event('run_resumed', state.step, seed=self.seed,
+                             agents=self.team.describe(), workflow=configuration or {},
+                             oracle_hints=self.oracle_hints, max_steps=self.max_steps,
+                             max_plan_attempts=self.max_plan_attempts,
+                             prefix_agent_calls=state.agent_calls)
+            return self._steps(environment, state)
+        except Exception as exc:
+            self.trace.event('run_error', self.step, error_type=type(exc).__name__, message=str(exc))
+            raise
+
+    def _steps(self, environment: Environment, start: StepState) -> bool:
+        observation, action_space, oracle, task = (
+            start.observation, start.action_space, start.oracle, start.task)
+        memory, previous_action = start.memory, start.previous_action
+        for step in range(start.step, self.max_steps):
+            self.step = step
+            state = self.call('observation', step, {'observation': observation})
+            memory_inputs = {'state': state}
+            if memory is not None:
+                memory_inputs['previous_memory'] = memory
+            if previous_action is not None:
+                memory_inputs['previous_action'] = previous_action
+            memory = self.call('memory', step, memory_inputs)
+            constraints = self.call('constraints', step,
+                                    {'task': task, 'action_space': action_space})
+            planner_inputs = {'state': state, 'memory': memory, 'constraints': constraints}
+            if oracle is not None:
+                planner_inputs['oracle'] = oracle
+            for attempt in range(self.max_plan_attempts):
+                plan = self.call('planner', step, planner_inputs, attempt)
+                # The raw observation lets a verifier check derived state against its source.
+                verification = self.call('verifier', step,
+                                         {'plan': plan, 'state': state, 'constraints': constraints,
+                                          'observation': observation}, attempt)
+                command = plan.content['action']
+                # Check the environment's command list independently of plugin-produced constraints.
+                admissible = command in action_space.content['commands']
+                approved = verification.content['approved'] and admissible
+                reason = verification.content['reason'] if admissible else 'Executor: inadmissible command'
+                gate = self.trace.add('execution_gate', 'deterministic_executor',
+                                      (plan.id, verification.id, action_space.id), step,
+                                      {'approved': approved, 'reason': reason,
+                                       'action': command})
+                if approved:
+                    break
+                self.trace.event('plan_rejected', step, (plan.id, verification.id, gate.id),
+                                 attempt=attempt, reason=reason)
+                planner_inputs['feedback'] = gate
+                planner_inputs['previous_plan'] = plan
+            else:
+                return self.finish(step, False, 'verification_rejected')
+            action = self.trace.add('action', 'deterministic_executor',
+                                    (plan.id, verification.id, gate.id), step,
+                                    {'command': command})
+            self.trace.event('action_requested', step, (action.id,), command=command)
+            frame = environment.step(command)
+            observation, action_space, oracle = self.snapshot(
+                frame, step + 1, (action.id, observation.id))
+            self.trace.event('transition', step + 1, (action.id, observation.id),
+                             score=frame.score, done=frame.done, won=frame.won)
+            previous_action = action
+            if frame.done or frame.won:
+                return self.finish(step + 1, frame.won, 'terminal')
+        return self.finish(self.max_steps, False, 'step_limit')

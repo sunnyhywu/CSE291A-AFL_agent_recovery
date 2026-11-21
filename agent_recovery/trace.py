@@ -62,6 +62,40 @@ class Trace:
             self.children[parent].add(artifact.id)
         return artifact
 
+    def extend(self, records: list[dict]) -> None:
+        """Copy a recorded trace prefix into this fresh trace, keeping IDs and sequence numbers.
+
+        A resumed episode thus has one complete DAG: the reused prefix followed by new work.
+        Later elapsed times continue from the prefix's last event.
+        """
+        if self.artifacts or self.sequence:
+            raise ValueError('Only a fresh trace can be extended with a recorded prefix')
+        last_elapsed = 0.0
+        for record in records:
+            if record['record'] == 'artifact':
+                artifact = Artifact(record['id'], record['kind'], record['producer'],
+                                    tuple(record['inputs']), record['step'], record['content'])
+                if artifact.id != f'a{len(self.artifacts):06d}':
+                    raise ValueError(f'Nonconsecutive artifact ID in prefix: {artifact.id}')
+                if not set(artifact.inputs) <= self.artifacts.keys():
+                    raise ValueError(f'Unknown parent in prefix: {artifact.id}')
+                self.write(record)
+                self.artifacts[artifact.id] = artifact
+                self.children[artifact.id] = set()
+                for parent in artifact.inputs:
+                    self.children[parent].add(artifact.id)
+            elif record['record'] == 'event':
+                if record['sequence'] != self.sequence:
+                    raise ValueError('Nonconsecutive event sequence in prefix')
+                if not set(record['artifact_ids']) <= self.artifacts.keys():
+                    raise ValueError('Unknown artifact reference in prefix event')
+                self.write(record)
+                self.sequence += 1
+                last_elapsed = record['elapsed_seconds']
+            else:
+                raise ValueError(f'Unknown record type: {record["record"]}')
+        self.started = time.monotonic() - last_elapsed
+
     def event(self, kind: str, step: int, ids=(), **details):
         if not set(ids) <= self.artifacts.keys():
             raise ValueError('Unknown artifact reference in event')
